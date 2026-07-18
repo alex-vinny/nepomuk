@@ -10,6 +10,9 @@
   "bin": {
     "azure-connector": "azure.mjs"
   },
+  "scripts": {
+    "test": "node --test test/selftest.mjs"
+  },
   "engines": {
     "node": ">=18"
   },

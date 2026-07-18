@@ -24,10 +24,39 @@ Auth is HTTP Basic with the PAT in the **password** slot (`base64(":" + PAT)`) �
 ignores the username. If `whoami` returns 401, the PAT is wrong or expired; a 403 means the PAT
 lacks the needed scope.
 
+### Multiple orgs (profiles)
+
+An Azure DevOps PAT is scoped to one **organization**, so multi-org support is one profile per
+org. The `.env` above is the default profile; add the rest to a git-ignored `azdo-profiles.json`
+(copy `azdo-profiles.example.json`):
+
+```jsonc
+{
+  "default": "work",
+  "profiles": {
+    "work":     { "org": "work-org", "project": "Platform", "defaultRepo": "api", "pat": "..." },
+    "personal": { "org": "me",        "project": "Sites",    "defaultRepo": "web", "patEnv": "AZDO_PAT_PERSONAL" }
+  }
+}
+```
+
+- A **PR URL** contains its org, so `pr` / `files` / `threads` / `comment` / … auto-select the
+  matching profile — paste any org's URL and the right PAT is used, no flags.
+- Non-URL commands (`whoami`, `create-pr`, `create-repo`, `raw`) use `--profile <name>`,
+  `AZDO_PROFILE`, or the `default`.
+- `pat` stores the token inline; **`patEnv` names an env var instead**, so no secret sits on
+  disk — inject it at runtime (e.g. from a secrets manager) and the tool reads it per call.
+- `profiles` lists what's configured; it never prints PAT values.
+
+`azdo-profiles.json` is git-ignored — like `.env`, never commit it.
+
 ## Usage
 
 ```sh
 node azure.mjs whoami                       # verify auth, list visible projects
+node azure.mjs whoami --profile personal    # ...for a specific profile
+node azure.mjs profiles                     # list configured profiles (PATs never shown)
+node azure.mjs create-repo my-repo --profile personal   # create an empty git repo
 node azure.mjs pr <url>                      # show a PR (title, branches, description)
 node azure.mjs pr <url> --json              # machine-readable
 node azure.mjs pr 19 --repo your-repo       # bare id + repo instead of a URL

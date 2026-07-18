@@ -2,8 +2,10 @@
 // Azure DevOps connector — read pull requests, list changes, post review comments.
 //
 // Auth: HTTP Basic = base64(":" + PAT). Azure DevOps ignores the username, so the
-//       PAT goes in the password slot. Config read from .env in this folder
-//       (AZDO_ORG, AZDO_PROJECT, AZDO_PAT, AZDO_DEFAULT_REPO). Never commit .env.
+//       PAT goes in the password slot. The .env in this folder (AZDO_ORG,
+//       AZDO_PROJECT, AZDO_PAT, AZDO_DEFAULT_REPO) is the default profile; extra
+//       orgs — each with its own PAT — go in azdo-profiles.json. A PR URL
+//       auto-selects the profile by org. Never commit .env / azdo-profiles.json.
 //
 // REST API 7.1. Zero dependencies — Node 18+ native fetch.
 
@@ -31,17 +33,112 @@ function loadEnv() {
 }
 loadEnv();
 
-const ORG = (process.env.AZDO_ORG || "").trim();
-const PROJECT = (process.env.AZDO_PROJECT || "").trim();
-const PAT = (process.env.AZDO_PAT || "").trim();
-
-if (!ORG || !PAT) {
-  console.error("Missing AZDO_ORG / AZDO_PAT — set them in .env");
-  process.exit(2);
+// --- profiles: one per Azure DevOps org (a PAT is org-scoped) --------------
+// The .env (AZDO_ORG/PROJECT/PAT/DEFAULT_REPO) is the default profile. Extra
+// orgs live in a git-ignored azdo-profiles.json next to this file:
+//   { "default": "name",
+//     "profiles": {
+//       "name": { "org": "...", "project": "...", "defaultRepo": "...",
+//                 "pat": "..."  |  "patEnv": "ENV_VAR_HOLDING_THE_PAT" } } }
+// Use "patEnv" to keep no secret on disk — inject the PAT from an env var at
+// runtime (e.g. a secrets manager: `<vault> run pat=ENV -- node azure.mjs ...`).
+// A PR URL carries its org, so URL commands auto-select the matching profile;
+// non-URL commands (whoami, create-pr, create-repo, raw) use
+// --profile / AZDO_PROFILE / the default.
+function loadProfiles() {
+  const profiles = {};
+  let defaultName;
+  const envOrg = (process.env.AZDO_ORG || "").trim();
+  if (envOrg) {
+    profiles[envOrg] = {
+      name: envOrg,
+      org: envOrg,
+      project: (process.env.AZDO_PROJECT || "").trim(),
+      defaultRepo: (process.env.AZDO_DEFAULT_REPO || "").trim(),
+      pat: (process.env.AZDO_PAT || "").trim(),
+      patEnv: "",
+    };
+    defaultName = envOrg;
+  }
+  try {
+    const file = process.env.AZDO_PROFILES_FILE || join(HERE, "azdo-profiles.json");
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    for (const [name, p] of Object.entries(raw.profiles || {})) {
+      profiles[name] = {
+        name,
+        org: (p.org || "").trim(),
+        project: (p.project || "").trim(),
+        defaultRepo: (p.defaultRepo || "").trim(),
+        pat: (p.pat || "").trim(),
+        patEnv: (p.patEnv || "").trim(),
+      };
+    }
+    if (raw.default) defaultName = String(raw.default);
+  } catch {
+    /* no azdo-profiles.json — .env profile only */
+  }
+  return { profiles, defaultName };
 }
 
-// Azure DevOps: username is ignored, PAT goes in the password slot.
-const AUTH = "Basic " + Buffer.from(`:${PAT}`).toString("base64");
+const { profiles: PROFILES, defaultName: DEFAULT_PROFILE } = loadProfiles();
+const BY_ORG = {};
+for (const p of Object.values(PROFILES)) if (p.org) BY_ORG[p.org.toLowerCase()] = p;
+
+// Resolve a profile's PAT: literal `pat`, else the env var named by `patEnv`.
+function profilePat(p) {
+  if (p.pat) return p.pat;
+  if (p.patEnv) return (process.env[p.patEnv] || "").trim();
+  return "";
+}
+
+// Pick the profile to use. urlOrg (parsed from a PR URL) wins — it dictates
+// which PAT can talk to that org; otherwise --profile / AZDO_PROFILE / default.
+function resolveProfile({ urlOrg, flagProfile } = {}) {
+  let p;
+  if (urlOrg) {
+    p = BY_ORG[urlOrg.toLowerCase()];
+    if (!p) {
+      throw new Error(
+        `no profile configured for org "${urlOrg}" — add it to azdo-profiles.json ` +
+          `(profiles.<name>.org = "${urlOrg}") or set AZDO_ORG in .env`
+      );
+    }
+  } else {
+    const name = flagProfile || process.env.AZDO_PROFILE || DEFAULT_PROFILE;
+    if (!name) {
+      throw new Error("no profile selected — set AZDO_ORG/AZDO_PAT in .env or pass --profile <name>");
+    }
+    p = PROFILES[name] || BY_ORG[String(name).toLowerCase()];
+    if (!p) {
+      throw new Error(
+        `unknown profile "${name}" — configured: ${Object.keys(PROFILES).join(", ") || "(none)"}`
+      );
+    }
+  }
+  const pat = profilePat(p);
+  if (!p.org || !pat) {
+    throw new Error(
+      `profile "${p.name}" is missing org or PAT` + (p.patEnv ? ` (is env ${p.patEnv} set?)` : "")
+    );
+  }
+  return { ...p, pat };
+}
+
+// Active profile state, set by activate() before any api() call runs.
+let ORG = "";
+let PROJECT = "";
+let PAT = "";
+let AUTH = "";
+let DEFAULT_REPO = "";
+function activate(p) {
+  ORG = p.org;
+  PROJECT = p.project;
+  PAT = p.pat;
+  DEFAULT_REPO = p.defaultRepo;
+  // Azure DevOps: username is ignored, PAT goes in the password slot.
+  AUTH = "Basic " + Buffer.from(`:${PAT}`).toString("base64");
+  return p;
+}
 
 // Network-level fetch failures (TLS resets, transient DNS) are common here; retry a few times.
 // HTTP error responses are NOT retried — they bubble up immediately.
@@ -99,7 +196,7 @@ function bodyArg(arg) {
 function parseArgs(rest) {
   const flags = { comment: [] };
   const positionals = [];
-  const VALUE = new Set(["repo", "title", "desc", "source", "target"]);
+  const VALUE = new Set(["repo", "title", "desc", "source", "target", "profile", "project"]);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--json") flags.json = true;
@@ -162,15 +259,22 @@ async function resolveInlineAnchor(project, repo, id, filePath) {
 
 const refName = (b) => (b.startsWith("refs/") ? b : `refs/heads/${b}`);
 
-// Resolve a PR reference: a full PR URL, or a bare numeric id (+ --repo / AZDO defaults).
+// Resolve a PR reference AND activate the profile it belongs to: a full PR URL
+// (org parsed from it selects the profile/PAT), or a bare numeric id (uses the
+// --profile / default profile, plus --repo / the profile's defaultRepo).
 function resolvePr(ref, flags) {
   if (/^\d+$/.test(ref)) {
-    const repo = flags.repo || process.env.AZDO_DEFAULT_REPO;
-    if (!repo) throw new Error("bare PR id needs --repo <name> (or AZDO_DEFAULT_REPO in .env)");
-    return { project: PROJECT, repo, id: Number(ref) };
+    const p = activate(resolveProfile({ flagProfile: flags.profile }));
+    const repo = flags.repo || p.defaultRepo;
+    if (!repo) throw new Error("bare PR id needs --repo <name> (or defaultRepo in the profile)");
+    if (!p.project) {
+      throw new Error("bare PR id needs a project — set it in the profile/.env, or pass a full PR URL");
+    }
+    return { project: p.project, repo, id: Number(ref) };
   }
   const m = ref.match(/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d+)/i);
   if (!m) throw new Error(`could not parse PR reference "${ref}" — pass a PR URL or a numeric id`);
+  activate(resolveProfile({ urlOrg: decodeURIComponent(m[1]) }));
   return {
     project: decodeURIComponent(m[2]),
     repo: decodeURIComponent(m[3]),
@@ -181,12 +285,48 @@ function resolvePr(ref, flags) {
 const shortRef = (ref) => (ref || "").replace(/^refs\/heads\//, "");
 
 const commands = {
-  async whoami() {
+  async whoami(_positionals, flags) {
+    activate(resolveProfile({ flagProfile: flags.profile }));
     // connectionData is preview-only at 7.1; projects is GA and proves auth + reachability.
     const d = await api("GET", `${orgBase()}/_apis/projects`);
     const names = (d.value || []).map((p) => p.name);
     console.log(`auth OK  org=${ORG}  project=${PROJECT || "(none)"}`);
     console.log(`projects: ${names.join(", ") || "—"}`);
+  },
+
+  // List configured profiles (never prints PAT values — only whether one is set).
+  async profiles() {
+    const names = Object.keys(PROFILES);
+    if (!names.length) {
+      console.log("no profiles configured — set AZDO_ORG/AZDO_PAT in .env or add azdo-profiles.json");
+      return;
+    }
+    for (const name of names) {
+      const p = PROFILES[name];
+      const mark = name === DEFAULT_PROFILE ? "  (default)" : "";
+      const pat = profilePat(p) ? (p.patEnv ? `from env ${p.patEnv}` : "set") : "MISSING";
+      console.log(
+        `${name}${mark}\n    org=${p.org}  project=${p.project || "—"}  ` +
+          `defaultRepo=${p.defaultRepo || "—"}  pat=${pat}`
+      );
+    }
+  },
+
+  // Create a new empty git repository in the profile's (or --project's) project.
+  async "create-repo"([name], flags) {
+    activate(resolveProfile({ flagProfile: flags.profile }));
+    const repoName = name || flags.repo;
+    const project = flags.project || PROJECT;
+    if (!repoName) throw new Error("usage: create-repo <name> [--project p] [--profile n]");
+    if (!project) {
+      throw new Error("create-repo needs a project — pass --project or set it in the profile/.env");
+    }
+    const created = await api("POST", `${projBase(project)}/_apis/git/repositories`, {
+      name: repoName,
+    });
+    console.log(`Created repo "${created.name}"  id=${created.id}`);
+    console.log(`Remote: ${created.remoteUrl || created.webUrl || "—"}`);
+    if (flags.json) console.log(JSON.stringify(created, null, 2));
   },
 
   async pr([ref], flags) {
@@ -347,7 +487,8 @@ const commands = {
   },
 
   async "create-pr"(positionals, flags) {
-    const repo = flags.repo || positionals[0] || process.env.AZDO_DEFAULT_REPO;
+    activate(resolveProfile({ flagProfile: flags.profile }));
+    const repo = flags.repo || positionals[0] || DEFAULT_REPO;
     if (!repo || !flags.source || !flags.title) {
       throw new Error(
         "usage: create-pr --repo <name> --source <branch> [--target <branch>] " +
@@ -404,9 +545,10 @@ const commands = {
     await postComments(project, repo, id, flags.comment);
   },
 
-  async raw([method, path, body]) {
+  async raw([method, path, body], flags) {
+    activate(resolveProfile({ flagProfile: flags.profile }));
     if (!method || !path) {
-      throw new Error("usage: raw <METHOD> <path|url> [json|@file]");
+      throw new Error("usage: raw <METHOD> <path|url> [json|@file] [--profile n]");
     }
     const url = /^https?:\/\//.test(path) ? path : `${orgBase()}${path}`;
     const d = await api(method.toUpperCase(), url, body ? JSON.parse(bodyArg(body)) : undefined);
@@ -419,7 +561,9 @@ const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || !commands[cmd]) {
   console.log(`azure <command> ...
 
-  whoami                                       verify auth (prints the authenticated user)
+  whoami [--profile n]                         verify auth (prints the org + visible projects)
+  profiles                                     list configured profiles (PAT values never shown)
+  create-repo <name> [--project p] [--profile n]   create an empty git repo in a project
   pr <url|id> [--repo r] [--json]              show a pull request (--json for machine output)
   files <url|id> [--repo r]                    list changed files (latest iteration)
   threads <url|id> [--repo r]                  list comment threads (with thread + comment ids)
@@ -438,6 +582,10 @@ if (!cmd || !commands[cmd]) {
 
   A PR <url> is the full browser URL ending in /pullrequest/<id>; a bare <id> needs --repo
   (or AZDO_DEFAULT_REPO in .env). Use @path to pass a file as a comment body.
+
+  Multiple orgs: the .env is the default profile; add more (each with its own PAT) to a
+  git-ignored azdo-profiles.json. A PR URL auto-selects its org's profile; other commands
+  take --profile <name> (or AZDO_PROFILE). \`profiles\` lists them.
 
   Convention: keep the PR description a tight summary (≤ ${MAX_DESC} chars) and put the
   detailed explanation of the feature in --comment threads.`);
