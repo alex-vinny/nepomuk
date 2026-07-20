@@ -77,12 +77,12 @@ required. Set it any one of these ways:
 node index.js config --pat <your-token> --org <your-org> --pat-valid-to 2027-04-16
 
 # Set a default project so bare work item ids work
-node index.js config --project "Kanban EL"
+node index.js config --project "MyBoard"
 
 # Or use environment variables (highest priority)
 export AZURE_PAT=<token>
 export AZURE_ORG=<org>
-export AZURE_PROJECT="Kanban EL"
+export AZURE_PROJECT="MyBoard"
 export AZURE_BASE_URL=https://dev.azure.com
 ```
 
@@ -96,9 +96,9 @@ A PAT is scoped to a single Azure DevOps org, so multi-org support is one profil
 
 ```jsonc
 {
-  "defaultProfile": "evuptec",
+  "defaultProfile": "contoso",
   "profiles": {
-    "evuptec": { "org": "evuptec", "project": "EVUP", "pat": "...", "patValidTo": "2027-04-16" },
+    "contoso": { "org": "contoso", "project": "Platform", "pat": "...", "patValidTo": "2027-04-16" },
     "other":   { "org": "other-org", "patEnv": "AZURE_PAT_OTHER" }
   }
 }
@@ -184,13 +184,13 @@ Confirms the active profile's PAT works and prints the org plus every project it
 
 ```bash
 node index.js raw <METHOD> <path|url> [<json>|@<file>]
-node index.js raw GET "/EVUP/_apis/git/repositories"
-node index.js raw PATCH "/EVUP/_apis/git/repositories/<repo>" '{"defaultBranch":"refs/heads/main"}'
+node index.js raw GET "/Platform/_apis/git/repositories"
+node index.js raw PATCH "/Platform/_apis/git/repositories/<repo>" '{"defaultBranch":"refs/heads/main"}'
 ```
 
 For any endpoint not yet wrapped. A `path` is appended to the org base (`https://dev.azure.com/<org>`); a full `https://` URL is used as-is. `api-version=7.1` is added unless the URL already has one. The body is inline JSON or `@file`. Auth, retry/backoff, and profile selection are shared with every other command.
 
-> From Git Bash (MSYS), a leading-slash path like `/EVUP/...` is rewritten to a Windows path before Node sees it. Use a full URL, or run from PowerShell.
+> From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path before Node sees it. Use a full URL, or run from PowerShell.
 
 ---
 
@@ -214,7 +214,7 @@ node index.js pr get <pr-url>
 
 Example:
 ```bash
-node index.js pr get https://dev.azure.com/evuptec/EVUP/_git/EVUP%20-%20ELOS/pullrequest/20687
+node index.js pr get https://dev.azure.com/contoso/Platform/_git/my-repo/pullrequest/20687
 ```
 
 Output: title, status, author, source/target branch, creation date.
@@ -245,7 +245,7 @@ take a bare branch or a full `refs/heads/...` ref; if omitted, they are read fro
 > ⚠️ **`--target` is required (no default to the repo's default branch).** When creating a
 > "PR → main/master" you must know the target branch first. The CLI does **not** fall back to
 > the repo's `defaultBranch`, and beware: the default branch is not always `main` (e.g.
-> `ELOS-SVC-COSTUMER` had its default pointing at a feature branch). Resolve it via the repo
+> `svc-customer` had its default pointing at a feature branch). Resolve it via the repo
 > API before creating — see **Repo-level reads not exposed as commands** below.
 
 > ⚠️ Azure DevOps limits the PR **description to 4000 characters**. The CLI validates this
@@ -282,8 +282,8 @@ Shows all active threads with author, date, file location (if inline), and conte
 ```bash
 # By repo URL, or --project/--repo; filter by status/target/date; --json for machine output
 node index.js pr list <repo-url>
-node index.js pr list --project ELOS --repo ELOS-SVC-CRM --status completed --since 2026-06-01
-node index.js pr list --project ELOS --repo ELOS-UI-CRM --status active --target releases/rc/202607_1 --top 20 --json
+node index.js pr list --project Platform --repo svc-crm --status completed --since 2026-06-01
+node index.js pr list --project Platform --repo ui-crm --status active --target releases/rc/202607_1 --top 20 --json
 ```
 
 `--status` = `active|completed|abandoned|all` (default `completed`). `--since <YYYY-MM-DD>` filters
@@ -386,8 +386,8 @@ Output: ID, type, state, title, assigned to, area, iteration, priority, descript
 
 Examples:
 ```bash
-node index.js wi get https://dev.azure.com/evuptec/EVUP/_workitems/edit/62576
-node index.js wi get 64891 --project "Kanban EL"
+node index.js wi get https://dev.azure.com/contoso/Platform/_workitems/edit/62576
+node index.js wi get 64891 --project "MyBoard"
 # if a default project is configured (config --project or AZURE_PROJECT):
 node index.js wi get 64891
 ```
@@ -409,7 +409,7 @@ node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <
   [--wiql "<query>"] [--fields <a,b,c>] [--json]
 ```
 
-- `<project>` — the team project name (e.g. `"Kanban EL"`). Required.
+- `<project>` — the team project name (e.g. `"MyBoard"`). Required.
 - `--title-contains <t>` / `--type <t>` / `--state <s>` — convenience filters; the command
   builds the WIQL `WHERE` clause from them (single quotes are escaped for WIQL).
 - `--wiql "<query>"` — supply a full WIQL query instead, overriding the filters above.
@@ -419,15 +419,15 @@ node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <
 
 Examples:
 ```bash
-# All Features whose title contains "PN1" in the Kanban EL project
-node index.js wi search "Kanban EL" --title-contains "PN1" --type Feature
+# All Features whose title contains "PN1" in the MyBoard project
+node index.js wi search "MyBoard" --title-contains "PN1" --type Feature
 
 # Same, as JSON, pulling description + acceptance criteria too
-node index.js wi search "Kanban EL" --title-contains "PN1" --type Feature \
+node index.js wi search "MyBoard" --title-contains "PN1" --type Feature \
   --fields System.Id,System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria --json
 
 # Full control via raw WIQL
-node index.js wi search "EVUP" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
+node index.js wi search "Platform" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
 ```
 
 > Programmatic use: the underlying `searchWorkItems({ config, org, project, wiql, fields })`
@@ -438,7 +438,7 @@ node index.js wi search "EVUP" --wiql "SELECT [System.Id] FROM WorkItems WHERE [
 
 #### Discover & edit custom fields (`layout`, `fields`, `field`, `set-field`)
 
-Custom processes (e.g. `ScrumAppEL` on `Kanban EL`) relabel and add fields — the UI
+Custom processes (e.g. `MyProcess` on `MyBoard`) relabel and add fields — the UI
 section "Causa Raiz" is backed by `Custom.CausaRaiz`, "Passo a Passo para Reprodução do
 Teste" is `Microsoft.VSTS.TCM.ReproSteps`, etc. **Empty fields are not returned by the
 API**, so you cannot discover an empty custom field from `wi get`/`wi fields` — use
@@ -473,16 +473,16 @@ node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a fie
 
 Examples:
 ```bash
-node index.js wi layout https://dev.azure.com/evuptec/Kanban%20EL/_workitems/edit/65130
+node index.js wi layout https://dev.azure.com/contoso/MyBoard/_workitems/edit/65130
 #   "Causa Raiz"  ->  Custom.CausaRaiz
 #   "Passo a Passo para Reprodução do Teste"  ->  Microsoft.VSTS.TCM.ReproSteps
-node index.js wi set-field https://dev.azure.com/evuptec/Kanban%20EL/_workitems/edit/65130 \
+node index.js wi set-field https://dev.azure.com/contoso/MyBoard/_workitems/edit/65130 \
   Custom.CausaRaiz --body-file causa-raiz.html
 ```
 
 > `Custom.CausaRaiz`, `Custom.RequisitosFuncionaisImplementados` ("Solução Implementada") and
 > `Microsoft.VSTS.TCM.ReproSteps` are all **HTML** fields (verified via
-> `GET /_apis/wit/fields/<ref>` → `type: html` on the ScrumAppEL process). Write HTML for these —
+> `GET /_apis/wit/fields/<ref>` → `type: html` on the MyProcess process). Write HTML for these —
 > Markdown written into an HTML field is stored literally and its special chars get escaped
 > (e.g. `"` → `&quot;`), so it renders as raw text.
 > Check the field type (`wi layout` shows the control, or inspect an existing value with
@@ -541,7 +541,7 @@ Then decide explicitly:
 
 Work items with no long-form custom fields (most Tasks/PBIs) post with no friction. The check is
 **generic** — it reads the WIT's form layout via the process API, so it works on any work item type
-in any project, not just EVUP Bugs. If the layout can't be fetched, the check is skipped rather than
+in any project, not just Platform Bugs. If the layout can't be fetched, the check is skipped rather than
 blocking a legitimate comment. This makes the routing decision **tool-enforced and agent-agnostic**:
 every caller is confronted with the field options, instead of relying on remembering them.
 
@@ -560,7 +560,7 @@ Use these tags when writing HTML directly:
 - **Dividers:** use `<hr>`.
 - **Pull-request links:** in work items, the `!id` shorthand does **not** auto-link. Use an explicit `<a>` tag:
   ```html
-  <a href="https://dev.azure.com/evuptec/VOE.IT%20-%20Espaco%20Laser/_git/EVUP%20-%20ELOS/pullrequest/21412"><strong>!21412</strong></a>
+  <a href="https://dev.azure.com/contoso/Contoso%20Labs/_git/my-repo/pullrequest/21412"><strong>!21412</strong></a>
   ```
 - Work items and changesets *do* auto-link with `#id`, so plain `#id` is fine in prose.
 
@@ -637,12 +637,12 @@ Iteration Path, and Assignee** unless `--assignee` overrides it.
 - `--estimate <hours>` sets both `OriginalEstimate` and `RemainingWork` (hours).
 - `--desc "<text>"` sets `System.Description`.
 - `--activity <name>` sets `Microsoft.VSTS.Common.Activity`. **Defaults to `Development`**
-  because some projects (e.g. `Kanban EL`) have a rule that makes Activity required —
+  because some projects (e.g. `MyBoard`) have a rule that makes Activity required —
   creating a Task without it fails with `TF401320: Rule Error for field Activity`.
 
 Example — break a PBI into child tasks:
 ```bash
-node index.js wi create-task https://dev.azure.com/evuptec/Kanban%20EL/_workitems/edit/64898 \
+node index.js wi create-task https://dev.azure.com/contoso/MyBoard/_workitems/edit/64898 \
   "[A] CrmJobService: TimerTrigger" --estimate 4 --desc "Criar a TimerTrigger function..."
 ```
 
@@ -689,32 +689,32 @@ If the work item has only one attachment, the selector can be omitted.
 
 ### `build` — Pipeline build operations
 
-List, inspect, and **re-run** pipeline builds. Generic across every EVUP/ELOS pipeline: a
+List, inspect, and **re-run** pipeline builds. Generic across every project pipeline: a
 re-run replays the source build's runtime variables (`parameters`) and `templateParameters`
-verbatim — a pipeline **with** variables (e.g. `APP-UI-CUSTOMER`: `clientName`, `platformName`,
+verbatim — a pipeline **with** variables (e.g. `ui-customer`: `clientName`, `platformName`,
 `deployMode`…) is replayed with those exact values; a pipeline **without** variables just
 re-queues with none. Requires `--project` (or a configured default / `AZURE_PROJECT`).
 
 ```bash
 # Recent builds on a branch (newest first)
-node index.js build list --project ELOS --branch features/65373_midia --top 10
+node index.js build list --project Platform --branch features/65373_midia --top 10
 
 # Filter by pipeline (name or numeric id) and/or repo; --json for raw objects
-node index.js build list --project ELOS --definition APP-UI-CUSTOMER --repo APP-UI-CUSTOMER --json
+node index.js build list --project Platform --definition ui-customer --repo ui-customer --json
 
 # Most-recent build matching the filters — full detail incl. its variables
-node index.js build last --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER
+node index.js build last --project Platform --branch features/65373_midia --definition ui-customer
 
 # Re-run the latest build on a branch with the SAME config/variables.
 # Previews by default (dry run); add --yes to actually queue.
-node index.js build rerun --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER
-node index.js build rerun --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER --yes
+node index.js build rerun --project Platform --branch features/65373_midia --definition ui-customer
+node index.js build rerun --project Platform --branch features/65373_midia --definition ui-customer --yes
 
 # Re-run one specific build id
-node index.js build rerun 40587 --project ELOS --yes
+node index.js build rerun 40587 --project Platform --yes
 
 # Re-run the same config against a different ref
-node index.js build rerun 40587 --project ELOS --branch releases/rc/202606_1 --yes
+node index.js build rerun 40587 --project Platform --branch releases/rc/202606_1 --yes
 ```
 
 Notes:
@@ -766,7 +766,7 @@ Gotchas learned in the field:
 | Pull Request | `https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{prId}` |
 | Work Item | `https://dev.azure.com/{org}/{project}/_workitems/edit/{id}` |
 
-URL-encoded project/repo names are handled automatically (e.g. `VOE.IT%20-%20Espaco%20Laser`).
+URL-encoded project/repo names are handled automatically (e.g. `Contoso%20Labs`).
 
 > **PowerShell note:** `%20` and other `%xx` sequences in URLs are expanded by PowerShell before
 > reaching this native tool. Double the percent signs (`%%20`) or put the command in a `.bat` file.

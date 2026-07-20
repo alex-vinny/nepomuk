@@ -975,7 +975,7 @@ function needProject(flags, config) {
     ? flags.project
     : (config.project || null);
   if (!project) die(
-    'This command requires a project. Pass --project "<project>" (e.g. ELOS), ' +
+    'This command requires a project. Pass --project "<project>" (e.g. Platform), ' +
     'set AZURE_PROJECT, or run: azure-connector config --project "<project>"'
   );
   return project;
@@ -1060,7 +1060,7 @@ async function cmdWhoami(config) {
   console.log(`projects: ${names.join(', ') || '—'}`);
 }
 
-// Raw REST passthrough. A path (e.g. "/EVUP/_apis/git/repositories") is appended
+// Raw REST passthrough. A path (e.g. "/Platform/_apis/git/repositories") is appended
 // to the org base; a full https:// URL is used as-is. api-version=7.1 is added
 // unless the URL already carries one. Body: inline JSON or @file.
 async function cmdRaw(method, apiPath, body, config) {
@@ -1164,9 +1164,9 @@ Configuration (in priority order):
 
 Profiles (multi-org — a PAT is scoped to one Azure DevOps org):
   Add a "profiles" map + optional "defaultProfile" to ~/.azure-connector.json:
-    { "defaultProfile": "evuptec",
+    { "defaultProfile": "contoso",
       "profiles": {
-        "evuptec":  { "org": "evuptec", "project": "EVUP", "pat": "..." },
+        "contoso":  { "org": "contoso", "project": "Platform", "pat": "..." },
         "other":    { "org": "other-org", "patEnv": "AZURE_PAT_OTHER" } } }
   A single top-level { pat, org, ... } (no "profiles") behaves exactly as one profile.
   Selection: --profile <name>  >  a URL's org  >  AZURE_PROFILE  >  defaultProfile  >  the top-level config.
@@ -1181,18 +1181,18 @@ PAT expiry:
 Examples:
   azure-connector config --pat <token> --org <org> --pat-valid-to 2027-04-16
   azure-connector whoami
-  azure-connector pr get https://dev.azure.com/evuptec/EVUP/_git/ELOS/pullrequest/123
+  azure-connector pr get https://dev.azure.com/contoso/Platform/_git/Platform/pullrequest/123
   azure-connector pr comment https://dev.azure.com/.../pullrequest/123 --body-file ./review.md
   azure-connector pr reply https://dev.azure.com/.../pullrequest/123 42 --body-file ./reply.md
   azure-connector pr edit-comment https://dev.azure.com/.../pullrequest/123 42 --body-file ./review.md
-  azure-connector wi get https://dev.azure.com/evuptec/EVUP/_workitems/edit/62576
+  azure-connector wi get https://dev.azure.com/contoso/Platform/_workitems/edit/62576
   azure-connector wi comment https://dev.azure.com/.../edit/62576 --body-file ./comment.html
   azure-connector wi attachments https://dev.azure.com/.../edit/62576
   azure-connector wi download https://dev.azure.com/.../edit/62576 1 --out /tmp
-  azure-connector build last  --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER
-  azure-connector build rerun --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER          # preview
-  azure-connector build rerun --project ELOS --branch features/65373_midia --definition APP-UI-CUSTOMER --yes    # queue it
-  azure-connector build rerun 40587 --project ELOS --yes                                                          # re-run a specific build id
+  azure-connector build last  --project Platform --branch features/65373_midia --definition ui-customer
+  azure-connector build rerun --project Platform --branch features/65373_midia --definition ui-customer          # preview
+  azure-connector build rerun --project Platform --branch features/65373_midia --definition ui-customer --yes    # queue it
+  azure-connector build rerun 40587 --project Platform --yes                                                          # re-run a specific build id
 
 Comment file formats:
   PR comments  — Markdown file (headers, lists, bold, code blocks work).
