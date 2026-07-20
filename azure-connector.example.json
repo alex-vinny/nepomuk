@@ -1,0 +1,16 @@
+{
+  "//": "Copy to ~/.azure-connector.json (or point AZURE_CONFIG_FILE at it). A single-org setup needs only the top-level pat/org/project. For multiple orgs add a profiles map — one profile per org, since a PAT is org-scoped. Env vars (AZURE_PAT, AZURE_ORG, ...) override whatever is resolved here. Never commit a real PAT.",
+
+  "pat": "PUT-PAT-HERE-OR-USE-A-PROFILE",
+  "org": "your-org",
+  "project": "Your Project",
+  "patName": "my token",
+  "patValidTo": "2027-04-16",
+  "patWarnDays": 30,
+
+  "defaultProfile": "your-org",
+  "profiles": {
+    "your-org":  { "org": "your-org",  "project": "Your Project", "pat": "PUT-PAT-HERE" },
+    "other-org": { "org": "other-org", "patEnv": "AZURE_PAT_OTHER" }
+  }
+}
