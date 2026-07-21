@@ -59,13 +59,25 @@ and do not let an edit on one side propagate to the other unless explicitly inte
 
 ## Setup
 
-```bash
-# Make the script executable (Linux/macOS/Git Bash)
-chmod +x D:/fontes/claude-tools/azure-connector/index.js
+Put the folder anywhere — the CLI resolves its own directory, so you can invoke it
+by absolute path from any working directory (no `cd` required). In the examples
+below, `<AZC>` stands for the path to your `azure-connector` folder; substitute
+your own (e.g. `~/tools/azure-connector`, `C:\tools\azure-connector`).
 
-# Optional: alias for convenience
-alias azure-connector="node D:/fontes/claude-tools/azure-connector/index.js"
+```bash
+# POSIX (Linux / macOS / Git Bash / WSL) — optional: mark executable + alias
+chmod +x "<AZC>/index.js"
+alias azure-connector='node "<AZC>/index.js"'
 ```
+
+```powershell
+# Windows PowerShell — define a function (add to $PROFILE to persist)
+function azure-connector { node "<AZC>\index.js" @args }
+```
+
+> All examples in this README write `node index.js …` for brevity — that assumes
+> the current directory is the folder, or that `index.js` is replaced by
+> `<AZC>/index.js` (or your `azure-connector` alias).
 
 ### Configure a PAT
 
@@ -736,8 +748,9 @@ they're added, reuse the transport + configured PAT directly from `lib/` — the
 the tool, never on the command line:
 
 ```js
-const { request } = require('D:/fontes/claude-tools/azure-connector/lib/api.js');
-const { loadConfig } = require('D:/fontes/claude-tools/azure-connector/lib/config.js');
+// require by absolute path to your azure-connector folder (<AZC>), or a path relative to your script
+const { request } = require('<AZC>/lib/api.js');
+const { loadConfig } = require('<AZC>/lib/config.js');
 const cfg = loadConfig(); const base = `${cfg.baseUrl}/${cfg.org}`;
 const enc = encodeURIComponent;
 
