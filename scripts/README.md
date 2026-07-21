@@ -10,5 +10,5 @@ carregados de lá, sem hardcode.
 > **Movido:** o antigo `tag-compare.js` (comparar duas tags de um repo) foi portado para o
 > tool **git-diff-analysis** como subcomando Python `tags`:
 > `python git_diff_analysis.py tags "<project>" "<repo>" "<oldTag>" "<newTag>"`
-> (ou `... tags "<repo-url>" "<oldTag>" "<newTag>"`). Ver
-> `D:/fontes/claude-tools/git-diff-analysis/README.md`.
+> (ou `... tags "<repo-url>" "<oldTag>" "<newTag>"`). Ver o README do tool
+> **git-diff-analysis**.
