@@ -25,9 +25,16 @@ and do not let an edit on one side propagate to the other unless explicitly inte
     (e.g. `"` → `&quot;`, `**bold**` stays as asterisks) — it renders as raw text.
   - **WI comment** = write **Markdown**. Raw HTML fed to `wi comment`/`wi edit-comment` is
     HTML-escaped by the converter and shows literally (`<strong>` → `&lt;strong&gt;`, and any
-    `&entity;` double-escapes to `&amp;entity;`). Use `**bold**`, `` `inline code` ``, `-` lists,
-    and fenced code blocks (```` ``` ````) — the converter emits a proper `<pre><code>` block and
-    drops the opening-fence info string (e.g. ```` ```ts ````).
+    `&entity;` double-escapes to `&amp;entity;`) — the one exception is a body that is HTML from
+    its first tag to its last, which is passed through untouched.
+    Supported constructs: `##`/`###`/`####` headings, `**bold**`, `` `inline code` ``, `-` lists,
+    `1.` numbered lists, `>` block quotes, `---` rules, GFM pipe tables, and fenced code blocks
+    (```` ``` ````) — the converter emits a proper `<pre><code>` block and drops the opening-fence
+    info string (e.g. ```` ```ts ````).
+    Tables need the **leading and trailing `|`** on every row (`| a | b |`) plus a delimiter row
+    (`|---|:--:|---:|`, which also sets column alignment); outer-pipe-less GFM tables are not
+    recognised, so prose containing a stray `|` is never mistaken for a table. A `|` inside inline
+    code is content, not a separator; elsewhere in a cell, escape it as `\|`.
 - HTML written into a **Markdown** PR body can render as raw tags. Write Markdown there.
 - Keep a separate body file per surface (e.g. `causa-raiz.html` for a WI field vs `pr-body.md` for a PR).
 - Verify a field's engine before writing: `GET /_apis/wit/fields/<ref>` → `type` (`html` / `plainText` / …),
@@ -47,6 +54,16 @@ and do not let an edit on one side propagate to the other unless explicitly inte
 > Trade-off to accept: either library adds the tool's **first runtime dependency** (today it is
 > zero-dep, Node built-ins only — see Requirements). That's the deliberate cost of retiring the
 > regex converter; take it rather than patching regex again.
+>
+> **Exception taken on 2026-08-19 (tables).** A WI comment with a pipe table rendered as literal
+> `| a | b |` text. The converter was **extended with regex** rather than swapped, by explicit
+> decision, because a drop-in library does not actually solve this case on its own: Azure renders
+> comment HTML **without our CSS**, so `markdown-it`/`marked` would emit a bare `<table>` that
+> comes out borderless — the inline `style=` attributes this converter writes are the part that
+> makes the table readable, and keeping them would require a custom renderer override anyway.
+> Added: pipe tables (with alignment and inline styling), `1.` lists, `>` quotes; covered by tests
+> in `test/connector.test.js`. **The policy above still stands for the next failure** — this
+> exception was about tables specifically, not a general licence to keep growing the regex.
 
 ---
 

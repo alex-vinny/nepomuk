@@ -305,3 +305,82 @@ test('loadConfig: patEnv yields empty PAT when the env var is unset', () => {
     assert.strictEqual(c.pat, ''); // AZURE_PAT_OTHER not set → no secret on disk, none injected
   });
 });
+
+// ── markdownToHtml: tables, ordered lists, quotes ─────────────────────────────
+test('markdownToHtml: pipe table becomes a real <table> with styled cells', () => {
+  const html = markdownToHtml('| # | Cenário |\n|---|---|\n| 1 | Só uma condição |\n| 2 | Duas condições |');
+  assert.ok(html.includes('<table'), 'emits a table element');
+  assert.ok(html.includes('<th style="border:1px solid #ccc;padding:6px;text-align:left">#</th>'), 'header cell is styled');
+  assert.ok(html.includes('>Só uma condição</td>'), 'body cell content preserved');
+  assert.strictEqual((html.match(/<tr/g) || []).length, 3, 'one header row + two body rows');
+  assert.ok(!html.includes('|---|'), 'delimiter row is consumed, not printed');
+  assert.ok(!/<p>\s*\|/.test(html), 'rows are not left as literal paragraphs');
+});
+
+test('markdownToHtml: table honours column alignment and inline formatting', () => {
+  const html = markdownToHtml('| a | b | c |\n|:---|:--:|---:|\n| **x** | `y` | z |');
+  assert.ok(html.includes('text-align:left">a</th>'));
+  assert.ok(html.includes('text-align:center">b</th>'));
+  assert.ok(html.includes('text-align:right">c</th>'));
+  assert.ok(html.includes('<strong>x</strong>'), 'bold works inside a cell');
+  assert.ok(html.includes('<code>y</code>'), 'inline code works inside a cell');
+});
+
+test('markdownToHtml: header-only table is not torn apart by the paragraph pass', () => {
+  const html = markdownToHtml('| a | b |\n|---|---|');
+  assert.ok(html.startsWith('<table'), 'stays one block');
+  assert.ok(!html.includes('<p>'), 'no paragraph wrapping inside the table');
+  assert.ok(html.includes('</table>'));
+});
+
+test('markdownToHtml: a pipe inside inline code is not a cell separator', () => {
+  const html = markdownToHtml('Texto com `a|b` no meio.');
+  assert.ok(html.includes('<code>a|b</code>'), 'pipe restored inside the code span');
+  assert.ok(!html.includes('[[[PIPE]]]'), 'no leftover placeholder marker');
+  assert.ok(!html.includes('<table'), 'prose with a pipe is not read as a table');
+});
+
+test('markdownToHtml: prose containing a pipe is not read as a table', () => {
+  const html = markdownToHtml('Rodar A | B para comparar.\n\nOutra linha.');
+  assert.ok(!html.includes('<table'));
+});
+
+test('markdownToHtml: numbered list becomes <ol>, separate from an adjacent <ul>', () => {
+  const html = markdownToHtml('1. um\n2. dois\n\n- a\n- b');
+  assert.ok(html.includes('<ol>'), 'ordered list');
+  assert.ok(html.includes('<li>um</li>'));
+  assert.ok(html.includes('<ul>'), 'unordered list still works');
+  assert.ok(html.includes('<li>a</li>'));
+  assert.ok(!/<ol>[\s\S]*<li>a<\/li>[\s\S]*<\/ol>/.test(html), 'bullets do not leak into the <ol>');
+});
+
+test('markdownToHtml: block quote becomes <blockquote> without stray breaks', () => {
+  const html = markdownToHtml('> Atenção ao caso 3.');
+  assert.ok(html.includes('<blockquote>'));
+  assert.ok(html.includes('<p>Atenção ao caso 3.</p>'));
+  assert.ok(!html.includes('&gt; Atenção'), 'the marker is consumed, not escaped into the text');
+  assert.ok(!/<br\/>\s*<\/blockquote>/.test(html), 'no trailing <br/> inside the quote');
+});
+
+test('markdownToHtml: full HTML input is still passed through untouched', () => {
+  const src = '<h2>T</h2>\n<table><tbody><tr><td>a</td></tr></tbody></table>';
+  assert.strictEqual(markdownToHtml(src), src);
+});
+
+// ── stripHtml: table read-back ────────────────────────────────────────────────
+const { stripHtml } = require('../lib/format');
+
+test('stripHtml: table cells keep a visible separator and rows stay on their own line', () => {
+  const html = '<table><thead><tr><th>#</th><th>Cenário</th></tr></thead>'
+    + '<tbody><tr><td>1</td><td>Uma condição</td></tr><tr><td>2</td><td>Duas condições</td></tr></tbody></table>';
+  const text = stripHtml(html);
+  assert.ok(text.includes('# | Cenário'), 'header cells separated');
+  assert.ok(text.includes('1 | Uma condição'), 'body cells separated');
+  assert.ok(!text.includes('CenárioUma'), 'rows do not run together');
+  assert.strictEqual(text.split('\n').filter((l) => l.includes('|')).length, 3, 'one line per row');
+});
+
+test('stripHtml: non-table markup is unchanged by the cell separator rule', () => {
+  assert.strictEqual(stripHtml('<p>a</p><p>b</p>').replace(/\n+/g, '|'), 'a|b');
+  assert.strictEqual(stripHtml('one<br/>two'), 'one\ntwo');
+});
