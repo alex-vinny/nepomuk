@@ -1,8 +1,15 @@
 # azure-connector
 
-A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, describe, comment, edit), work items (PBI/Bug/Task reading, commenting, editing, state, tasks), attachment download, wiki, and pipeline builds. Multi-org via profiles; a raw REST passthrough for anything not yet wrapped.
+A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, describe, comment, edit), work items (PBI/Bug/Task reading, commenting, editing, state, tasks), attachment download, repositories, iterations, wiki, and pipeline builds. Multi-org via profiles; a raw REST passthrough for anything not yet wrapped.
 
 Built as a fallback for when the MCP azure-devops integration is unavailable or unreliable.
+
+**Measuring a team's process?** Four commands answer the questions the board cannot:
+[`wi updates`](#wi-updates--how-the-item-moved-state-history) (how an item actually moved),
+[`sprints`](#sprints--iterations-and-their-dates) (the sprint window),
+[`pr timeline`](#pr-timeline--when-the-review-actually-happened) (whether a repo is really being
+reviewed), and [`repo`](#repo--repository-metadata-and-refs) (default branch, ids, does-this-branch-exist). Worked pipelines in
+[Agent recipes](#agent-recipes--measuring-a-team-from-the-board).
 
 ---
 
@@ -397,6 +404,57 @@ file from the source branch. With `--patch`, it fetches both the old (target bra
 
 ---
 
+#### `pr timeline` — when the review actually happened
+
+```bash
+# One PR: created → published → every vote → completed, with day deltas
+node index.js pr timeline <pr-url> [--json]
+
+# A whole repo: review health across its PRs
+node index.js pr timeline --repo <r> --project <p> [--status all|active|completed] [--top <n>] [--json]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--repo <r>` | Switches to repo mode. Without it, the first argument is a PR URL. |
+| `--project <p>` | Required in repo mode unless a default project is configured. |
+| `--status` | `all` (default in repo mode), `active`, `completed`, `abandoned`. |
+| `--top <n>` | How many PRs to pull. Default 50. |
+| `--json` | `{ health, prs: [...] }` in repo mode; the single summary otherwise. |
+
+**Why this exists and `pr get` is not enough.** The PR object carries each reviewer's *current*
+vote but never *when* it was cast, and nothing in the API says "this PR was completed with no
+review at all". Both are reconstructed from the system comments in the thread feed.
+
+Azure's vote scale is not intuitive — the numbers are not ordered the way you would guess, and
+`0` means *no vote*, not *neutral*:
+
+| Code | Meaning |
+|---:|---|
+| `10` | approved |
+| `5` | approved with suggestions |
+| `0` | no vote (a reviewer who **cleared** their vote — not a review) |
+| `-5` | waiting for author |
+| `-10` | rejected |
+
+A vote of `0` is shown in the event list but never counts as the first review, and never rescues a
+PR from the no-vote tally.
+
+Repo mode prints a row per PR, then the aggregate:
+
+```
+median age 2.5 d   max 42 d   median days-to-first-vote 0.1
+merged/closed with NO vote: 12 of 18 (67%)  #21693 #21650 #21646 ...
+
+by author:
+  A. Reviewer              n= 10  median    1.6 d  max   36.8 d  no-vote 10
+```
+
+Reach for it when the question is *"is this repo actually being reviewed?"* — the no-vote count is
+the answer, and no per-PR view can show it.
+
+---
+
 ### `wi` — Work Item (PBI / Bug) operations
 
 All commands accept a standard Azure DevOps work item URL:
@@ -716,6 +774,99 @@ If the work item has only one attachment, the selector can be omitted.
 
 ---
 
+#### `wi updates` — how the item moved (state history)
+
+```bash
+# Every System.State transition on one item
+node index.js wi updates <wi-url|id> [--project <p>]
+
+# Track a different field
+node index.js wi updates <wi-url|id> --field System.IterationPath
+
+# Discovery: every field every revision touched
+node index.js wi updates <wi-url|id> --all-fields
+
+# How long it sat in each state (the open one is measured to now)
+node index.js wi updates <wi-url|id> --time-in-state
+
+# When did it first/last reach a given state?
+node index.js wi updates <wi-url|id> --entered "Pronto para Teste"
+
+# Bulk: one TSV row per transition, across many items
+node index.js wi updates --ids 61683,62845,63049 --project <p>
+node index.js wi updates --ids @sprint-ids.txt --project <p> > transitions.tsv
+```
+
+| Flag | Meaning |
+|---|---|
+| `--field <ref>` | Field to track. Default `System.State`. |
+| `--all-fields` | Every changed field, every revision. Use to find which field carries the signal. |
+| `--time-in-state` | Spans per value, in days. The final span is open and measured against now. |
+| `--entered "<v>"` | Just the first and last time the field took that value. |
+| `--ids <a,b,c\|@file>` | Bulk mode. `@file` accepts ids separated by newlines, spaces or commas. Needs `--project`. |
+| `--json` | Machine output for every mode above. |
+
+**Why this exists.** A work item carries only its *current* state. Every question about the path it
+took — cycle time, how often it bounced back, when it reached QA, whether it arrived before the
+sprint ended — has to come from the revision feed, and there is no other way to get it.
+
+Bulk output is a TSV (`id · at · from · to · by`) designed to be piped straight into `awk`/`sort`:
+
+```bash
+node index.js wi updates --ids @ids.txt --project <p> \
+  | awk -F'\t' '$3=="Pronto para Teste" && $4=="Em Teste"' | wc -l
+```
+
+Two things the raw feed will trip you on, both handled here: a revision that rewrites a field with
+the **same value** is not a transition (counting those inflates every total), and Azure stamps the
+newest revision with a **year-9999** date meaning "still current", which is reported as no date
+rather than making every open item look 8000 years old.
+
+> Scope the call to the project the item lives in. The org-level `workItems/{id}/updates` endpoint
+> can return a truncated history for an item that moved between projects — `--project` (or a
+> configured default) avoids it.
+
+---
+
+### `sprints` — Iterations and their dates
+
+```bash
+node index.js sprints <project> [--team <t>] [--filter <pattern>] [--depth <n>] [--current] [--json]
+
+# Every iteration whose path matches
+node index.js sprints Fabrikam --filter "Sprint Corp"
+
+# Only the ones containing today
+node index.js sprints Fabrikam --current
+
+# One team's subscribed sprints, rather than everything defined in the project
+node index.js sprints Fabrikam --team "Fabrikam Team"
+```
+
+| Flag | Meaning |
+|---|---|
+| `--team <t>` | Switch source: the flat list one team subscribed to, instead of the project tree. |
+| `--filter <p>` | Case-insensitive regex; retried as a literal substring if it matches nothing. |
+| `--depth <n>` | Tree depth. Default 4 (project → release → sprint → sub). |
+| `--current` | Keep only iterations whose window contains today, boundaries inclusive. |
+| `--json` | `[{ path, name, start, finish }]`. |
+
+Alias: `iterations`.
+
+Sprint **dates live here and nowhere else** — a work item carries only its `IterationPath` string,
+so any "was this delivered inside the sprint?" question needs this command to supply the window.
+Paths are printed backslash-separated exactly as `System.IterationPath` stores them, so a row can be
+pasted straight into a WIQL `UNDER` clause.
+
+> `--filter` tries regex first and falls back to a literal substring. That matters because a pasted
+> path like `Fabrikam\2026\Sprint 1` is *valid* regex that silently matches nothing (`\2` is a
+> backreference, `\S` is non-whitespace) — the fallback is what makes pasting a path work.
+
+An undated node is normal, not an error: folders exist purely to group sprints and print as
+`(undated)`.
+
+---
+
 ### `build` — Pipeline build operations
 
 List, inspect, and **re-run** pipeline builds. Generic across every project pipeline: a
@@ -756,13 +907,46 @@ Notes:
 
 ---
 
-## Repo-level reads not exposed as commands (lib workaround)
+### `repo` — Repository metadata and refs
 
-The CLI covers PRs and work items, but has **no first-class commands** for repo metadata,
-git refs, or listing PRs. These come up constantly in promotion / merge-back flows (resolve a
-repo's default branch, confirm a source branch exists, check for a duplicate open PR). Until
-they're added, reuse the transport + configured PAT directly from `lib/` — the PAT stays inside
-the tool, never on the command line:
+```bash
+node index.js repo list [--project <p>] [--json]                        # omit --project to sweep the org
+node index.js repo get  <name|repo-url> [--project <p>] [--json]
+node index.js repo refs <name|repo-url> [--filter heads/<b>] [--json]
+```
+
+These come up constantly in promotion and merge-back flows — resolve a repo's default branch before
+targeting a PR, confirm a source branch exists before creating one, get the repo **id** (several
+repo-property writes reject the name and only accept the id).
+
+`repo get` prints exactly the fields callers use:
+
+```
+Web  (Fabrikam)
+  id             abc-1234-…
+  defaultBranch  main
+  size           12286251 bytes
+  disabled       false
+  remoteUrl      https://…/_git/Web
+  webUrl         https://…/_git/Web
+```
+
+**Does a branch exist?** Ask `repo refs` and read the count — an empty result is the answer:
+
+```bash
+node index.js repo refs Web --project Fabrikam --filter heads/release/2026-06
+# 0 ref(s) …  → the branch does not exist
+```
+
+Gotchas learned in the field:
+- **Changing a repo's default branch is a repo-property PATCH and needs the repo *id* in the URL,
+  not the name** — by name the API returns a misleading `HTTP 400 "The request is invalid."` (not a
+  404). Body: `{ "defaultBranch": "refs/heads/main" }`. Get the id from `repo get`. It also requires
+  the Git **`RenameRepository`** ("Edit repository properties") permission on that repo — the *Code
+  Full* PAT scope is not enough if the identity lacks the ACL (fails `403 TF401027`).
+- **Bulk creation/linking** (`pr create`, `wi link-pr`) is one-at-a-time. For fan-out — one PR per
+  repo across a sprint's release branches — script over `lib/`, reusing the transport and the
+  configured PAT so the secret never reaches a command line:
 
 ```js
 // require by absolute path to your azure-connector folder (<AZC>), or a path relative to your script
@@ -771,23 +955,64 @@ const { loadConfig } = require('<AZC>/lib/config.js');
 const cfg = loadConfig(); const base = `${cfg.baseUrl}/${cfg.org}`;
 const enc = encodeURIComponent;
 
-// repo metadata (id + defaultBranch)
-const repo = await request(`${base}/${enc(project)}/_apis/git/repositories/${enc(repoName)}?api-version=7.1`, { pat: cfg.pat });
-// does a branch exist?  refs?filter=heads/<branch>
-const refs = await request(`${base}/${enc(project)}/_apis/git/repositories/${enc(repoName)}/refs?filter=${enc('heads/'+branch)}&api-version=7.1`, { pat: cfg.pat });
 // active PRs source->target (dedup before creating)
-const prs  = await request(`${base}/${enc(project)}/_apis/git/repositories/${enc(repoName)}/pullrequests?searchCriteria.status=active&searchCriteria.sourceRefName=${enc('refs/heads/'+src)}&searchCriteria.targetRefName=${enc('refs/heads/'+tgt)}&api-version=7.1`, { pat: cfg.pat });
+const prs = await request(`${base}/${enc(project)}/_apis/git/repositories/${enc(repoName)}/pullrequests?searchCriteria.status=active&searchCriteria.sourceRefName=${enc('refs/heads/'+src)}&searchCriteria.targetRefName=${enc('refs/heads/'+tgt)}&api-version=7.1`, { pat: cfg.pat });
 ```
 
-Gotchas learned in the field:
-- **Changing a repo's default branch is a repo-property PATCH and needs the repo *id* in the
-  URL, not the name** — by name the API returns a misleading `HTTP 400 "The request is
-  invalid."` (not a 404). Body: `{ "defaultBranch": "refs/heads/main" }`. It also requires the
-  Git **`RenameRepository`** ("Edit repository properties") permission on that repo — the
-  *Code Full* PAT scope is not enough if the identity lacks the ACL (fails `403
-  TF401027`).
-- **Bulk creation/linking** (`pr create`, `wi link-pr`) is one-at-a-time; script over the lib
-  for fan-out (e.g. one PR per repo across a sprint's release branches).
+---
+
+## Agent recipes — measuring a team from the board
+
+Three end-to-end pipelines. Every step is a **read**; nothing here writes to Azure DevOps. Measure
+per sprint and per demand — the numbers below are about a *process*, and none of them are a
+per-person productivity metric.
+
+**1. Throughput by month and work-item type.** Did the queue actually grow, and of what?
+
+```bash
+node index.js wi search "<project>" --json --fields System.WorkItemType,System.State,Microsoft.VSTS.Common.ClosedDate \
+  --wiql "SELECT [System.Id] FROM WorkItems
+          WHERE [System.AreaPath] UNDER '<project>\\<area>'
+            AND [System.State] = 'Done'
+            AND [Microsoft.VSTS.Common.ClosedDate] >= '2025-09-01'" \
+  > done.json
+# then group by month × type
+```
+
+Watch for a **taxonomy change** mid-window: if the team started filing "Support Request" where it
+used to file "Bug", a bug count that falls is not quality improving. Group by type before concluding
+anything.
+
+**2. When work actually reached the next stage.** The sprint window comes from `sprints`, the
+arrival moment from `wi updates`.
+
+```bash
+node index.js sprints "<project>" --filter "<sprint prefix>" --json > sprints.json
+node index.js wi search "<project>" --json --wiql "…" | jq -r '.[].id' > ids.txt
+node index.js wi updates --ids @ids.txt --project "<project>" > transitions.tsv
+
+# how many items reached test in the last 2 days of the sprint, or after it closed?
+awk -F'\t' '$4=="<ready-for-test state>"' transitions.tsv
+```
+
+`--entered "<state>"` gives the same answer for a single item.
+
+**3. Is the repo actually being reviewed?**
+
+```bash
+node index.js pr timeline --repo <r> --project <p> --status all --top 100
+```
+
+Read the `NO vote` line first. A high count means merges are not being reviewed at all, which is a
+different problem from *slow* review and needs a different fix — and it is invisible in any per-PR
+view.
+
+> **A caution that belongs with the numbers.** Commit counts, PR counts and transition counts
+> measure activity, not value. They are sound for spotting a *process* failure (no reviewers, work
+> arriving after the sprint closed, a state nobody uses) and unsound as a measure of an individual.
+> If a metric here is about to be attached to a person's name, that is the moment to stop.
+
+---
 
 ## URL formats
 
@@ -823,6 +1048,12 @@ All calls use API version `7.1`. Key endpoints used:
 | Create work item | POST | `/_apis/wit/workitems/${type}` (JSON Patch body) |
 | Update work item | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch body) |
 | Download attachment | GET | attachment URL from work item relations |
+| Work item change history | GET | `/_apis/wit/workItems/{id}/updates` (paginated `$top`/`$skip`) |
+| Iteration tree | GET | `/_apis/wit/classificationnodes/iterations?$depth=N` |
+| Team iterations | GET | `/{team}/_apis/work/teamsettings/iterations` |
+| List repos | GET | `/_apis/git/repositories` (project optional — omit for the whole org) |
+| Repo metadata | GET | `/_apis/git/repositories/{repo}` |
+| List refs | GET | `/_apis/git/repositories/{repo}/refs?filter=heads/{branch}` |
 
 ---
 
@@ -834,12 +1065,15 @@ azure-connector/
 ├── package.json
 ├── README.md
 ├── test/
-│   └── connector.test.js  # unit tests (node:test)
+│   ├── connector.test.js  # unit tests (node:test)
+│   └── analytics.test.js  # unit tests for the measurement helpers
 └── lib/
     ├── config.js     # PAT/org config, URL parser
     ├── api.js        # HTTP transport (no external deps)
-    ├── pr.js         # Pull request operations
-    ├── workitem.js   # Work item operations + attachment download
+    ├── pr.js         # Pull request operations + review timeline / vote events
+    ├── workitem.js   # Work item operations, attachment download, change history
+    ├── iteration.js  # Iterations (sprints) and their date windows
+    ├── repo.js       # Repository metadata and refs
     ├── build.js      # Pipeline build list/last/rerun (generic variable replay)
     └── format.js     # Pretty-print helpers
 ```
@@ -850,7 +1084,15 @@ azure-connector/
 npm test   # or: node --test
 ```
 
-Unit tests (Node built-in `node:test`, no network/PAT) cover `parseArgs`, `normalizeAzureRepoPath`
-(MSYS path de-mangling), `parseUrl`, `buildThreadBody` (inline-anchor threadContext, right/left side),
+Unit tests (Node built-in `node:test`, no network, no PAT). `connector.test.js` covers `parseArgs`,
+`normalizeAzureRepoPath` (MSYS path de-mangling), `parseUrl`, `buildThreadBody` (inline-anchor
+threadContext, right/left side), `markdownToHtml` / `stripHtml`, `loadConfig` profile resolution,
 and the `build` helpers `normalizeBranchRef` / `buildRerunPayload` (generic variable replay, incl.
 pipelines with no variables) / `summarizeBuild`.
+
+`analytics.test.js` covers the measurement helpers behind `wi updates`, `sprints`, `pr timeline`
+and `repo`. Anything that needs the clock takes `now` as an **argument** rather than reading it —
+that is what keeps the suite deterministic and what lets an old measurement be re-run and produce
+the same numbers. The cases worth knowing about are the ones asserting what must *not* count: a
+same-value rewrite is not a state transition, a year-9999 date is no date, a human comment reading
+"Bob voted 10" is not a vote, and a cleared vote (`0`) is not a review.
