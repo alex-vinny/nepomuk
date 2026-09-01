@@ -44,6 +44,10 @@ const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
 const fmt = require('./lib/format');
 const build = require('./lib/build');
+// Suffixed: `repo` and `iteration` are already local variable names in several
+// handlers, and a shadowed module reference fails at call time, not at load.
+const iterationLib = require('./lib/iteration');
+const repoLib = require('./lib/repo');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -1104,6 +1108,238 @@ async function cmdCreateRepo(name, flags, config) {
 
 // ── router ─────────────────────────────────────────────────────────────────
 
+// ── measurement commands (read-only) ─────────────────────────────────────────
+
+// Resolve --ids: a comma list, or @file containing ids separated by any whitespace
+// or commas (so a WIQL dump, one id per line, can be piped straight in).
+function readIdList(raw) {
+  if (!raw || raw === true) return [];
+  let text = String(raw);
+  if (text.startsWith('@')) {
+    const file = text.slice(1);
+    try { text = fs.readFileSync(file, 'utf8'); }
+    catch (e) { die(`Could not read ids file "${file}": ${e.message}`); }
+  }
+  return text.split(/[\s,]+/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
+}
+
+async function cmdWiUpdates(rawUrl, flags, config) {
+  const field = (flags.field && flags.field !== true) ? flags.field : 'System.State';
+  const now = new Date();
+  const bulkIds = readIdList(flags.ids);
+
+  // Bulk mode: one row per transition across many items. This is the shape the
+  // board-level questions need ("how many items entered state X, and when").
+  if (bulkIds.length) {
+    const project = (flags.project && flags.project !== true) ? flags.project : config.project;
+    if (!project) die('--ids needs a project. Pass --project "<p>" or configure a default project.');
+
+    const rows = [];
+    for (const id of bulkIds) {
+      let updates;
+      try {
+        updates = await wi.getWorkItemUpdates({ config, org: config.org, project, id });
+      } catch (e) {
+        process.stderr.write(`azure-connector: work item ${id} failed: ${e.message}\n`);
+        continue;
+      }
+      for (const c of wi.extractFieldChanges(updates, field)) rows.push({ id: Number(id), ...c });
+    }
+
+    if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    console.log(['id', 'at', 'from', 'to', 'by'].join('\t'));
+    for (const r of rows) console.log([r.id, r.at || '', r.from, r.to, r.by].join('\t'));
+    process.stderr.write(`\n${rows.length} transition(s) of ${field} across ${bulkIds.length} work item(s).\n`);
+    return;
+  }
+
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const updates = await wi.getWorkItemUpdates({ config, ...p });
+
+  if (flags['all-fields']) {
+    // Every field every revision touched — the discovery mode, for finding which
+    // field actually carries the signal before measuring it.
+    const rows = [];
+    for (const u of updates) {
+      for (const [ref, ch] of Object.entries(u.fields || {})) {
+        if (!ch || ch.oldValue === ch.newValue) continue;
+        rows.push({ rev: u.rev, field: ref, from: ch.oldValue, to: ch.newValue, by: (u.revisedBy || {}).displayName || '' });
+      }
+    }
+    if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    for (const r of rows) console.log(`r${r.rev}\t${r.field}\t${String(r.from ?? '')} → ${String(r.to ?? '')}\t${r.by}`);
+    return;
+  }
+
+  const changes = wi.extractFieldChanges(updates, field);
+
+  if (flags.entered && flags.entered !== true) {
+    const state = flags.entered;
+    const out = { id: p.id, state, first: wi.firstEntry(changes, state), last: wi.lastEntry(changes, state) };
+    if (flags.json) { console.log(JSON.stringify(out, null, 2)); return; }
+    console.log(`#${out.id}  entered "${state}"  first=${out.first || '(never)'}  last=${out.last || '(never)'}`);
+    return;
+  }
+
+  if (flags['time-in-state']) {
+    const spans = wi.timeInState(changes, now);
+    if (flags.json) { console.log(JSON.stringify(spans, null, 2)); return; }
+    console.log(`Time in each ${field} value for #${p.id}:`);
+    for (const s of spans) {
+      console.log(`  ${String(s.state).padEnd(28)} ${String(s.days).padStart(8)} d  ${s.enteredAt.slice(0, 16)} → ${s.open ? '(still open)' : s.leftAt.slice(0, 16)}`);
+    }
+    return;
+  }
+
+  if (flags.json) { console.log(JSON.stringify(changes, null, 2)); return; }
+  if (!changes.length) { console.log(`No ${field} transitions on #${p.id}.`); return; }
+  console.log(`${changes.length} ${field} transition(s) on #${p.id}:`);
+  for (const c of changes) {
+    console.log(`  ${(c.at || '(undated)').slice(0, 16)}  ${String(c.from || '(new)').padEnd(24)} → ${String(c.to).padEnd(24)} ${c.by}`);
+  }
+}
+
+async function cmdSprints(project, flags, config) {
+  const proj = (project && project !== true) ? project
+    : ((flags.project && flags.project !== true) ? flags.project : config.project);
+  if (!proj) die('Usage: sprints <project> [--team <t>] [--filter <pattern>] [--depth <n>] [--current] [--json]');
+
+  const team = (flags.team && flags.team !== true) ? flags.team : null;
+  let rows;
+  if (team) {
+    rows = iterationLib.flattenTeamIterations(
+      await iterationLib.getTeamIterations({ config, org: config.org, project: proj, team })
+    );
+  } else {
+    const depth = (flags.depth && flags.depth !== true) ? parseInt(flags.depth, 10) : 4;
+    rows = iterationLib.flattenIterationTree(
+      await iterationLib.getIterationTree({ config, org: config.org, project: proj, depth })
+    );
+  }
+
+  if (flags.filter) rows = iterationLib.filterIterations(rows, flags.filter);
+  if (flags.current) rows = iterationLib.currentIteration(rows, new Date());
+
+  if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+  console.log(`${rows.length} iteration(s) in "${proj}"${team ? ` for team "${team}"` : ''}:`);
+  for (const r of rows) {
+    console.log(`  ${r.path.padEnd(48)} ${(r.start || '(undated)').padEnd(12)} ${r.finish || ''}`);
+  }
+}
+
+async function cmdPrTimeline(rawUrl, flags, config) {
+  const now = new Date();
+  const repoFlag = (flags.repo && flags.repo !== true) ? flags.repo : null;
+
+  // Repo mode: review health across many PRs. The per-PR view cannot show that a
+  // PR was completed with nobody voting on it — only the population can.
+  if (repoFlag) {
+    const org = (flags.org && flags.org !== true) ? flags.org : config.org;
+    const project = (flags.project && flags.project !== true) ? flags.project : config.project;
+    if (!org || !project) die('pr timeline --repo needs --project "<p>" (or a configured default project).');
+
+    const status = (flags.status && flags.status !== true) ? flags.status : 'all';
+    const top = (flags.top && flags.top !== true) ? parseInt(flags.top, 10) : 50;
+    const listed = await pr.listPullRequests({ config, org, project, repo: repoFlag, status, top });
+    const prs = (listed && listed.value) || [];
+
+    const summaries = [];
+    for (const p of prs) {
+      const threads = await pr.getComments({ config, org, project, repo: repoFlag, prId: p.pullRequestId });
+      summaries.push(pr.summarizePrTimeline(p, threads, now));
+    }
+    const health = pr.reviewHealth(summaries);
+
+    if (flags.json) { console.log(JSON.stringify({ health, prs: summaries }, null, 2)); return; }
+
+    console.log(`${summaries.length} PR(s) [${status}] in ${project}/${repoFlag}\n`);
+    console.log(['PR', 'AUTHOR', 'CREATED', 'AGE d', '1st VOTE d', 'STATUS', 'VOTES'].join('\t'));
+    for (const s of summaries.sort((a, b) => (a.created < b.created ? 1 : -1))) {
+      const votes = s.votes.length ? s.votes.map((v) => `${v.who.split(' ')[0]}:${v.vote}`).join(' ') : '— none —';
+      console.log([
+        `#${s.id}`, s.author.slice(0, 18), String(s.created).slice(0, 10),
+        s.ageDays, s.daysToFirstVote === null ? '—' : s.daysToFirstVote,
+        s.open ? 'active' : s.status, votes,
+      ].join('\t'));
+    }
+    console.log(`\nmedian age ${health.medianAgeDays} d   max ${health.maxAgeDays} d   median days-to-first-vote ${health.medianDaysToFirstVote === null ? '—' : health.medianDaysToFirstVote}`);
+    console.log(`merged/closed with NO vote: ${health.noVote.length} of ${health.total} (${Math.round(health.noVoteRatio * 100)}%)  ${health.noVote.map((id) => '#' + id).join(' ')}`);
+    console.log('\nby author:');
+    for (const [who, a] of Object.entries(health.byAuthor)) {
+      console.log(`  ${who.padEnd(24)} n=${String(a.n).padStart(3)}  median ${String(a.medianAgeDays).padStart(6)} d  max ${String(a.maxAgeDays).padStart(6)} d  no-vote ${a.noVote}`);
+    }
+    return;
+  }
+
+  const p = needUrl(rawUrl, 'pr');
+  const data = await pr.getPullRequest({ config, ...p });
+  const threads = await pr.getComments({ config, ...p });
+  const s = pr.summarizePrTimeline(data, threads, now);
+
+  if (flags.json) { console.log(JSON.stringify(s, null, 2)); return; }
+  console.log(`PR #${s.id} — ${s.title}`);
+  console.log(`author ${s.author}   status ${s.status}${s.isDraft ? ' (draft)' : ''}   age ${s.ageDays} d\n`);
+  console.log(`  ${String(s.created).slice(0, 16)}  created`);
+  if (s.publishedAt) console.log(`  ${String(s.publishedAt).slice(0, 16)}  published (left draft)`);
+  for (const v of s.votes) {
+    console.log(`  ${String(v.at).slice(0, 16)}  ${v.who} → ${v.vote} (${pr.voteLabel(v.vote)})`);
+  }
+  if (s.closed) console.log(`  ${String(s.closed).slice(0, 16)}  ${s.status}`);
+  console.log('');
+  if (s.noVote) console.log('  ⚠ no reviewer ever voted on this PR.');
+  else console.log(`  first vote after ${s.daysToFirstVote} d (${s.firstVote.who})`);
+}
+
+async function cmdRepoList(flags, config) {
+  const project = (flags.project && flags.project !== true) ? flags.project : config.project;
+  const data = await repoLib.listRepos({ config, org: config.org, project });
+  const rows = ((data && data.value) || []).map(repoLib.summarizeRepo);
+  if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+  console.log(`${rows.length} repo(s)${project ? ` in "${project}"` : ` in org "${config.org}"`}:`);
+  for (const r of rows.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    console.log(`  ${r.name.padEnd(34)} ${String(r.defaultBranch || '—').padEnd(20)} ${r.isDisabled ? '(disabled) ' : ''}${r.id}`);
+  }
+}
+
+async function cmdRepoGet(rawRepo, flags, config) {
+  const parsed = rawRepo && rawRepo !== true ? parseUrl(rawRepo) : null;
+  const org = parsed ? parsed.org : config.org;
+  const project = parsed ? parsed.project
+    : ((flags.project && flags.project !== true) ? flags.project : config.project);
+  const name = parsed ? parsed.repo
+    : ((rawRepo && rawRepo !== true) ? rawRepo : (flags.repo && flags.repo !== true ? flags.repo : null));
+  if (!project || !name) die('Usage: repo get <name|repo-url> [--project <p>]');
+
+  const r = repoLib.summarizeRepo(await repoLib.getRepo({ config, org, project, repo: name }));
+  if (flags.json) { console.log(JSON.stringify(r, null, 2)); return; }
+  console.log(`${r.name}  (${r.project})`);
+  console.log(`  id             ${r.id}`);
+  console.log(`  defaultBranch  ${r.defaultBranch || '—'}`);
+  console.log(`  size           ${r.size === null ? '—' : r.size} bytes`);
+  console.log(`  disabled       ${r.isDisabled}`);
+  console.log(`  remoteUrl      ${r.remoteUrl || '—'}`);
+  console.log(`  webUrl         ${r.webUrl || '—'}`);
+}
+
+async function cmdRepoRefs(rawRepo, flags, config) {
+  const parsed = rawRepo && rawRepo !== true ? parseUrl(rawRepo) : null;
+  const org = parsed ? parsed.org : config.org;
+  const project = parsed ? parsed.project
+    : ((flags.project && flags.project !== true) ? flags.project : config.project);
+  const name = parsed ? parsed.repo
+    : ((rawRepo && rawRepo !== true) ? rawRepo : (flags.repo && flags.repo !== true ? flags.repo : null));
+  if (!project || !name) die('Usage: repo refs <name|repo-url> [--filter heads/<branch>] [--project <p>]');
+
+  const filter = (flags.filter && flags.filter !== true) ? flags.filter : undefined;
+  const data = await repoLib.listRefs({ config, org, project, repo: name, filter });
+  const refs = (data && data.value) || [];
+  if (flags.json) { console.log(JSON.stringify(refs, null, 2)); return; }
+  console.log(`${refs.length} ref(s) in ${project}/${name}${filter ? ` matching "${filter}"` : ''}:`);
+  for (const r of refs) {
+    console.log(`  ${repoLib.shortBranch(r.name).padEnd(48)} ${String(r.objectId || '').slice(0, 8)}  ${(r.creator || {}).displayName || ''}`);
+  }
+}
+
 function printHelp() {
   console.log(`
 azure-connector — Azure DevOps CLI
@@ -1114,6 +1350,11 @@ Usage:
   azure-connector whoami [--profile <name>]                       # verify auth; print the org + visible projects
   azure-connector raw <METHOD> <path|url> [<json>|@<file>]        # raw REST call (path appended to the org base; api-version added)
   azure-connector create-repo <name> [--project <p>]              # create an empty git repository
+  azure-connector sprints <project> [--team <t>] [--filter <pattern>] [--depth <n>] [--current] [--json]   # iterations + their start/finish dates (alias: iterations)
+
+  azure-connector repo list [--project <p>] [--json]                          # every repo, with id + default branch
+  azure-connector repo get  <name|repo-url> [--project <p>] [--json]          # id, defaultBranch, size, clone urls
+  azure-connector repo refs <name|repo-url> [--filter heads/<b>] [--json]     # list refs; empty result = branch does not exist
 
   azure-connector pr get           <pr-url|pr-create-url>
   azure-connector pr list          <repo-url> | --project <p> --repo <r> [--status active|completed|abandoned|all] [--target <branch>] [--top <n>] [--since <YYYY-MM-DD>] [--json]
@@ -1129,6 +1370,9 @@ Usage:
   azure-connector pr abandon       <pr-url>                                          # set PR status to abandoned (branches remain)
   azure-connector pr delete-thread <pr-url> <threadId> [--comment <n>]
   azure-connector pr close-thread  <pr-url> <threadId>
+  azure-connector pr timeline      <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas
+  azure-connector pr timeline      --repo <r> [--project <p>] [--status all|active|completed] [--top <n>] [--json]
+                                   # review health for a whole repo: age, days-to-first-vote, and PRs merged with NO vote
 
   azure-connector wi get         <wi-url>
   azure-connector wi search      <project> [--title-contains <t>] [--type <t>] [--state <s>] [--wiql "<q>"] [--fields a,b] [--json]   # WIQL search; auto-paginates batch fetch
@@ -1145,6 +1389,9 @@ Usage:
   azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]
    azure-connector wi attachments <wi-url>
    azure-connector wi download    <wi-url> [<index|name>] [--out <dir>]
+  azure-connector wi updates     <wi-url> [--field <ref>] [--all-fields] [--time-in-state] [--entered "<State>"] [--json]
+                                   # how the item MOVED (default field: System.State). The work item itself only carries its current state.
+  azure-connector wi updates     --ids <a,b,c|@file> --project <p> [--field <ref>] [--json]   # bulk: one TSV row per transition, across many items
 
    azure-connector wiki list --project <project> [--org <org>]          # list wikis in a project
    azure-connector wiki pages --project <project> --wiki <wikiIdOrName> [--org <org>]  # list wiki pages
@@ -1244,6 +1491,16 @@ async function main() {
   if (group === 'whoami') return cmdWhoami(config);
   if (group === 'raw') return cmdRaw(sub, arg1, arg2, config);
   if (group === 'create-repo') return cmdCreateRepo(sub, flags, config);
+  if (group === 'sprints' || group === 'iterations') return cmdSprints(sub, flags, config);
+
+  if (group === 'repo') {
+    if (!sub) { printHelp(); die('Missing repo subcommand.'); }
+    if (sub === 'list') return cmdRepoList(flags, config);
+    if (sub === 'get')  return cmdRepoGet(arg1, flags, config);
+    if (sub === 'refs') return cmdRepoRefs(arg1, flags, config);
+    printHelp();
+    die(`Unknown repo subcommand: ${sub}`);
+  }
 
   // Opt-in network pre-flight: validate the PAT before running the real command.
   // Off by default (adds a round-trip); a failed real call already reports auth
@@ -1270,6 +1527,7 @@ async function main() {
     if (sub === 'abandon')       return cmdPrAbandon(arg1, config);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
     if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config);
+    if (sub === 'timeline')      return cmdPrTimeline(arg1, flags, config);
     die(`Unknown pr subcommand: ${sub}`);
   }
 
@@ -1291,6 +1549,7 @@ async function main() {
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
     if (sub === 'download')    return cmdWiDownload(arg1, arg2, flags, config);
+    if (sub === 'updates' || sub === 'history') return cmdWiUpdates(arg1, flags, config);
     die(`Unknown wi subcommand: ${sub}`);
   }
 
