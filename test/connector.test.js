@@ -60,24 +60,24 @@ test('normalizeAzureRepoPath: null/true short-circuit', () => {
 
 // ── parseUrl ──────────────────────────────────────────────────────────────────
 test('parseUrl: pull request', () => {
-  const p = parseUrl('https://dev.azure.com/evuptec/ELOS/_git/ELOS-SVC-CRM/pullrequest/21371');
+  const p = parseUrl('https://dev.azure.com/contoso/Fabrikam/_git/Fabrikam-SVC-CRM/pullrequest/21371');
   assert.strictEqual(p.type, 'pr');
-  assert.strictEqual(p.project, 'ELOS');
-  assert.strictEqual(p.repo, 'ELOS-SVC-CRM');
+  assert.strictEqual(p.project, 'Fabrikam');
+  assert.strictEqual(p.repo, 'Fabrikam-SVC-CRM');
   assert.strictEqual(p.prId, 21371);
 });
 
 test('parseUrl: work item', () => {
-  const p = parseUrl('https://dev.azure.com/evuptec/ELOS/_workitems/edit/65239');
+  const p = parseUrl('https://dev.azure.com/contoso/Fabrikam/_workitems/edit/65239');
   assert.strictEqual(p.type, 'workitem');
   assert.strictEqual(p.id, 65239);
 });
 
 test('parseUrl: repo url and project with encoded spaces', () => {
-  const p = parseUrl('https://dev.azure.com/evuptec/EVUP%20-%20ELOS/_git/SCH');
+  const p = parseUrl('https://dev.azure.com/contoso/Contoso%20Labs/_git/Web');
   assert.strictEqual(p.type, 'repo');
-  assert.strictEqual(p.project, 'EVUP - ELOS');
-  assert.strictEqual(p.repo, 'SCH');
+  assert.strictEqual(p.project, 'Contoso Labs');
+  assert.strictEqual(p.repo, 'Web');
 });
 
 test('parseUrl: garbage returns null', () => {
@@ -185,12 +185,12 @@ test('summarizeBuild: flattens key fields, parses parameters, builds web url', (
     sourceBranch: 'refs/heads/features/65373_midia',
     sourceVersion: 'eb51ec9e5e54b0f3d516ac88b71db0035b206ee2',
     parameters: '{"clientName":"botoclinic"}',
-  }, 'https://dev.azure.com/evuptec/ELOS');
+  }, 'https://dev.azure.com/contoso/Fabrikam');
   assert.strictEqual(s.id, 40658);
   assert.strictEqual(s.definition, 'APP-UI-CUSTOMER');
   assert.strictEqual(s.sourceVersion, 'eb51ec9e'); // truncated to 8
   assert.deepStrictEqual(s.parameters, { clientName: 'botoclinic' });
-  assert.strictEqual(s.url, 'https://dev.azure.com/evuptec/ELOS/_build/results?buildId=40658');
+  assert.strictEqual(s.url, 'https://dev.azure.com/contoso/Fabrikam/_build/results?buildId=40658');
 });
 
 // ── markdownToHtml (WI comments) ─────────────────────────────────────────────
