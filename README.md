@@ -767,7 +767,7 @@ node index.js wi download <wi-url> 1
 node index.js wi download <wi-url> "screenshot.png"
 
 # Specify output directory
-node index.js wi download <wi-url> 1 --out C:/Users/AlexZamboli/Downloads
+node index.js wi download <wi-url> 1 --out ./downloads
 ```
 
 If the work item has only one attachment, the selector can be omitted.
