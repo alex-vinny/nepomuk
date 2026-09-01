@@ -444,7 +444,7 @@ Repo mode prints a row per PR, then the aggregate:
 
 ```
 median age 2.5 d   max 42 d   median days-to-first-vote 0.1
-merged/closed with NO vote: 12 of 18 (67%)  #21693 #21650 #21646 ...
+merged/closed with NO vote: 12 of 18 (67%)  #1204 #1198 #1187 ...
 
 by author:
   A. Reviewer              n= 10  median    1.6 d  max   36.8 d  no-vote 10
