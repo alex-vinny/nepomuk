@@ -384,3 +384,85 @@ test('stripHtml: non-table markup is unchanged by the cell separator rule', () =
   assert.strictEqual(stripHtml('<p>a</p><p>b</p>').replace(/\n+/g, '|'), 'a|b');
   assert.strictEqual(stripHtml('one<br/>two'), 'one\ntwo');
 });
+
+// ── bare-id resolution (pr / wi) ─────────────────────────────────────────────
+
+const { needPrUrlOrId, needWorkItemUrlOrId } = require('../index.js');
+const { printPullRequest } = require('../lib/format');
+
+const CFG = { org: 'contoso', project: 'DefaultProj', repo: 'DefaultRepo' };
+
+test('needPrUrlOrId: a full PR URL wins over any flag/config default', () => {
+  const p = needPrUrlOrId(
+    'https://dev.azure.com/contoso/MyProj/_git/MyRepo/pullrequest/123',
+    CFG,
+    { project: 'Ignored', repo: 'Ignored' }
+  );
+  assert.deepStrictEqual(p, { type: 'pr', org: 'contoso', project: 'MyProj', repo: 'MyRepo', prId: 123 });
+});
+
+test('needPrUrlOrId: a bare id takes project/repo from flags first', () => {
+  const p = needPrUrlOrId('456', CFG, { project: 'FlagProj', repo: 'FlagRepo' });
+  assert.deepStrictEqual(p, { type: 'pr', org: 'contoso', project: 'FlagProj', repo: 'FlagRepo', prId: 456 });
+});
+
+test('needPrUrlOrId: a bare id falls back to the configured project/repo', () => {
+  const p = needPrUrlOrId('789', CFG, {});
+  assert.deepStrictEqual(p, { type: 'pr', org: 'contoso', project: 'DefaultProj', repo: 'DefaultRepo', prId: 789 });
+});
+
+test('needPrUrlOrId: a valueless flag (--project with no argument) is ignored', () => {
+  const p = needPrUrlOrId('789', CFG, { project: true, repo: true });
+  assert.strictEqual(p.project, 'DefaultProj');
+  assert.strictEqual(p.repo, 'DefaultRepo');
+});
+
+test('needWorkItemUrlOrId: a bare id needs only a project (ids are org-unique)', () => {
+  const w = needWorkItemUrlOrId('22604', CFG, {});
+  assert.deepStrictEqual(w, { type: 'workitem', org: 'contoso', project: 'DefaultProj', id: 22604 });
+});
+
+// ── printPullRequest: linked work items + --full extras ──────────────────────
+
+function capture(fn) {
+  const orig = console.log;
+  const out = [];
+  console.log = (...args) => out.push(args.join(' '));
+  try { fn(); } finally { console.log = orig; }
+  return out.join('\n');
+}
+
+const PR_FIXTURE = {
+  pullRequestId: 1, title: 'T', status: 'active',
+  sourceRefName: 'refs/heads/a', targetRefName: 'refs/heads/b',
+  reviewers: [{ displayName: 'Ann', vote: 10, isRequired: true }, { displayName: 'Bo', vote: 0 }],
+};
+
+test('printPullRequest: linked work items render as #id list', () => {
+  const out = capture(() => printPullRequest(PR_FIXTURE, { workItems: [{ id: 11 }, { id: 22 }] }));
+  assert.match(out, /Work items: #11, #22/);
+});
+
+test('printPullRequest: no linked work items says "(none)", not nothing', () => {
+  const out = capture(() => printPullRequest(PR_FIXTURE, { workItems: [] }));
+  assert.match(out, /Work items: \(none\)/);
+});
+
+test('printPullRequest: without the extras the work-item line is absent', () => {
+  const out = capture(() => printPullRequest(PR_FIXTURE));
+  assert.doesNotMatch(out, /Work items:/);
+});
+
+test('printPullRequest: --full renders votes and thread counts; vote 0 is "no vote"', () => {
+  const threads = [
+    { status: 'active', threadContext: { filePath: '/a.cs' } },
+    { status: 'closed', threadContext: { filePath: '/b.cs' } },
+    { status: 'active' },
+    { status: 'active', isDeleted: true },
+  ];
+  const out = capture(() => printPullRequest(PR_FIXTURE, { workItems: [], threads }));
+  assert.match(out, /Ann — approved \(required\)/);
+  assert.match(out, /Bo — no vote/);
+  // 4 threads, 1 deleted → 3 active; of those, 2 are status 'active' (open).
+  assert.match(out, /Threads:\s+3 \(2 open, 2 anchored to a file\)/);
+});
