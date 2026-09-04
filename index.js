@@ -1199,6 +1199,51 @@ async function cmdWiUpdates(rawUrl, flags, config) {
   }
 }
 
+async function cmdWiRelations(rawUrl, flags, config) {
+  const wanted = (flags.type && flags.type !== true)
+    ? String(flags.type).toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
+    : null;
+  const keep = (rels) => (wanted ? rels.filter((r) => wanted.includes(r.kind)) : rels);
+
+  const bulkIds = readIdList(flags.ids);
+
+  // Bulk mode: one row per relation across many items — the first step of any
+  // ticket→code measurement (work item → linked PRs → files).
+  if (bulkIds.length) {
+    const project = (flags.project && flags.project !== true) ? flags.project : config.project;
+    if (!project) die('--ids needs a project. Pass --project "<p>" or configure a default project.');
+
+    const items = await wi.getWorkItemsRelationsBatch({ config, org: config.org, project, ids: bulkIds });
+    const returned = new Set(items.map((it) => it.id));
+    for (const id of bulkIds) {
+      if (!returned.has(Number(id))) {
+        process.stderr.write(`azure-connector: work item ${id} not returned (deleted, or in another project).\n`);
+      }
+    }
+    const rows = [];
+    for (const it of items) {
+      for (const r of keep(wi.normalizeRelations(it))) rows.push({ id: it.id, ...r });
+    }
+
+    if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    console.log(['id', 'kind', 'target', 'repoId', 'name'].join('\t'));
+    for (const r of rows) console.log([r.id, r.kind, r.target, r.repoId || '', r.name || ''].join('\t'));
+    process.stderr.write(`\n${rows.length} relation(s) across ${items.length} work item(s).\n`);
+    return;
+  }
+
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const item = await wi.getWorkItem({ config, ...p });
+  const rels = keep(wi.normalizeRelations(item));
+  if (flags.json) { console.log(JSON.stringify(rels, null, 2)); return; }
+  if (!rels.length) { console.log(`No ${wanted ? wanted.join(',') + ' ' : ''}relation(s) on #${p.id}.`); return; }
+  console.log(`${rels.length} relation(s) on #${p.id}:`);
+  for (const r of rels) {
+    const extra = (r.repoId ? `  repo=${r.repoId}` : '') + (r.name ? `  (${r.name})` : '');
+    console.log(`  ${String(r.kind).padEnd(12)} ${r.target}${extra}`);
+  }
+}
+
 async function cmdSprints(project, flags, config) {
   const proj = (project && project !== true) ? project
     : ((flags.project && flags.project !== true) ? flags.project : config.project);
@@ -1392,6 +1437,8 @@ Usage:
   azure-connector wi updates     <wi-url> [--field <ref>] [--all-fields] [--time-in-state] [--entered "<State>"] [--json]
                                    # how the item MOVED (default field: System.State). The work item itself only carries its current state.
   azure-connector wi updates     --ids <a,b,c|@file> --project <p> [--field <ref>] [--json]   # bulk: one TSV row per transition, across many items
+  azure-connector wi relations   <wi-url|id> [--type pr,commit,parent,child,related,attachment,hyperlink,branch,build] [--json]   # typed links, vstfs URLs decoded (pr/commit ids usable directly)
+  azure-connector wi relations   --ids <a,b,c|@file> --project <p> [--type pr] [--json]   # bulk: one TSV row per relation (200 ids per API call) — step 1 of ticket→code
 
    azure-connector wiki list --project <project> [--org <org>]          # list wikis in a project
    azure-connector wiki pages --project <project> --wiki <wikiIdOrName> [--org <org>]  # list wiki pages
@@ -1550,6 +1597,7 @@ async function main() {
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
     if (sub === 'download')    return cmdWiDownload(arg1, arg2, flags, config);
     if (sub === 'updates' || sub === 'history') return cmdWiUpdates(arg1, flags, config);
+    if (sub === 'relations') return cmdWiRelations(arg1, flags, config);
     die(`Unknown wi subcommand: ${sub}`);
   }
 
