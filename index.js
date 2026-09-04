@@ -114,14 +114,6 @@ function unescapeDescription(text) {
     .replace(/\\\\/g, '\\');
 }
 
-function needUrl(raw, expectedType) {
-  if (!raw) die(`Missing URL argument. Expected an Azure DevOps ${expectedType} URL.`);
-  const parsed = parseUrl(raw);
-  if (!parsed) die(`Cannot parse URL: ${raw}`);
-  if (parsed.type !== expectedType) die(`Expected a ${expectedType} URL but got type '${parsed.type}'.`);
-  return parsed;
-}
-
 // Resolve a work-item argument that may be either a full Azure DevOps URL or a
 // bare numeric id. When a bare id is given, the project is taken from the
 // --project flag, AZURE_PROJECT env var, or the configured default project.
@@ -147,16 +139,52 @@ function needWorkItemUrlOrId(raw, config, flags) {
   return { type: 'workitem', org: config.org, project, id };
 }
 
+// Resolve a PR argument that may be either a full Azure DevOps URL or a bare
+// numeric id. Unlike work items, a PR id is only unique within its repository,
+// so a bare id also needs a project and a repo — taken from --project/--repo,
+// the AZURE_PROJECT/AZURE_REPO env vars, or the configured defaults.
+function needPrUrlOrId(raw, config, flags = {}) {
+  if (!raw) die('Missing PR URL or id.');
+
+  // `pr-compare` is only meaningful to the commands that handle it explicitly
+  // (pr get / pr diff); they call parseUrl themselves before reaching here.
+  const parsed = parseUrl(raw);
+  if (parsed && parsed.type === 'pr') return parsed;
+  if (parsed) die(`Expected a pr URL but got type '${parsed.type}'.`);
+
+  const prId = parseInt(raw, 10);
+  if (isNaN(prId) || String(prId) !== String(raw).trim()) {
+    die(`Cannot parse PR URL or id: ${raw}`);
+  }
+
+  const pick = (k, envK, cfgK) =>
+    (flags[k] && flags[k] !== true) ? flags[k] : (process.env[envK] || config[cfgK] || null);
+  const project = pick('project', 'AZURE_PROJECT', 'project');
+  const repo = pick('repo', 'AZURE_REPO', 'repo');
+
+  const missing = [];
+  if (!project) missing.push('--project "<project>" (or AZURE_PROJECT)');
+  if (!repo) missing.push('--repo "<repo>" (or AZURE_REPO)');
+  if (missing.length) die(
+    `PR id "${raw}" requires ${missing.join(' and ')}. ` +
+    'Set defaults with: azure-connector config --project "<p>" --repo "<r>", ' +
+    'or pass the full PR URL instead.'
+  );
+
+  return { type: 'pr', org: config.org, project, repo, prId };
+}
+
 // ── command handlers ───────────────────────────────────────────────────────
 
 async function cmdConfig(args, flags) {
   const config = loadConfig();
   const has = (k) => flags[k] && flags[k] !== true;
-  if (flags.pat || flags.org || flags.project || flags['base-url'] || has('pat-valid-to') || has('pat-name') || has('pat-warn-days')) {
+  if (flags.pat || flags.org || flags.project || flags.repo || flags['base-url'] || has('pat-valid-to') || has('pat-name') || has('pat-warn-days')) {
     const patch = {};
     if (flags.pat) patch.pat = flags.pat;
     if (flags.org) patch.org = flags.org;
     if (flags.project) patch.project = flags.project;
+    if (flags.repo) patch.repo = flags.repo;
     if (flags['base-url']) patch.baseUrl = flags['base-url'];
     if (has('pat-valid-to')) patch.patValidTo = flags['pat-valid-to'];
     if (has('pat-name')) patch.patName = flags['pat-name'];
@@ -169,6 +197,7 @@ async function cmdConfig(args, flags) {
     pat: config.pat ? config.pat.slice(0, 6) + '…' + config.pat.slice(-4) : '(not set)',
     org: config.org,
     project: config.project || '(not set)',
+    repo: config.repo || '(not set)',
     baseUrl: config.baseUrl,
     patName: config.patName || '(unknown)',
     patValidTo: config.patValidTo || '(unknown)',
@@ -185,7 +214,7 @@ async function cmdConfig(args, flags) {
     console.log(`\nProfiles:    ${config.profilesConfigured.join(', ')}  (select with --profile <name>, AZURE_PROFILE, or a URL's org)`);
   }
   console.log(`\nConfig file: ${require('./lib/config').configPath()}`);
-  console.log('Env vars:    AZURE_PAT, AZURE_ORG, AZURE_PROJECT, AZURE_BASE_URL, AZURE_PROFILE, AZURE_PAT_VALID_TO, AZURE_PAT_NAME, AZURE_PAT_WARN_DAYS, AZURE_PREFLIGHT');
+  console.log('Env vars:    AZURE_PAT, AZURE_ORG, AZURE_PROJECT, AZURE_REPO, AZURE_BASE_URL, AZURE_PROFILE, AZURE_PAT_VALID_TO, AZURE_PAT_NAME, AZURE_PAT_WARN_DAYS, AZURE_PREFLIGHT');
 }
 
 // ── PAT commands ─────────────────────────────────────────────────────────────
@@ -215,12 +244,10 @@ async function cmdPatCheck(config) {
 
 // ── PR commands ────────────────────────────────────────────────────────────
 
-async function cmdPrGet(rawUrl, config) {
-  const parsed = parseUrl(rawUrl);
-  if (!parsed) die(`Cannot parse URL: ${rawUrl}`);
-
-  if (parsed.type === 'pr-compare') {
-    const { org, project, repo, sourceRef, targetRef } = parsed;
+async function cmdPrGet(rawUrl, config, flags = {}) {
+  const compare = parseUrl(rawUrl);
+  if (compare && compare.type === 'pr-compare') {
+    const { org, project, repo, sourceRef, targetRef } = compare;
     const result = await pr.findPullRequestsByBranch({ config, org, project, repo, sourceRef, targetRef });
     const prs = result.value || [];
     if (prs.length > 0) {
@@ -233,29 +260,44 @@ async function cmdPrGet(rawUrl, config) {
     return;
   }
 
-  if (parsed.type !== 'pr') die(`Expected a pr URL but got type '${parsed.type}'.`);
-  const data = await pr.getPullRequest({ config, ...parsed });
-  fmt.printPullRequest(data);
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const data = await pr.getPullRequest({ config, ...p });
+
+  // Linked work items are what a reviewer needs first, and "(none)" is itself a
+  // finding — so this is always fetched, not hidden behind a flag.
+  const workItems = await pr.getPullRequestWorkItems({ config, ...p });
+
+  // --full adds the review state: votes per reviewer and the thread counts.
+  let extras = null;
+  if (flags.full) {
+    const threads = await pr.getComments({ config, ...p });
+    extras = { threads: threads.value || [] };
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify({ ...data, workItems, ...(extras || {}) }, null, 2));
+    return;
+  }
+
+  fmt.printPullRequest(data, { workItems, ...(extras || {}) });
 }
 
 async function cmdPrDiff(rawUrl, config, flags = {}) {
-  const parsed = parseUrl(rawUrl);
-  if (!parsed) die(`Cannot parse URL: ${rawUrl}`);
+  const compare = parseUrl(rawUrl);
 
   let org, project, repo, sourceRef, targetRef;
 
-  if (parsed.type === 'pr-compare') {
-    ({ org, project, repo, sourceRef, targetRef } = parsed);
+  if (compare && compare.type === 'pr-compare') {
+    ({ org, project, repo, sourceRef, targetRef } = compare);
     // Strip refs/heads/ prefix if present
     sourceRef = sourceRef.replace(/^refs\/heads\//, '');
     targetRef = targetRef.replace(/^refs\/heads\//, '');
-  } else if (parsed.type === 'pr') {
+  } else {
+    const parsed = needPrUrlOrId(rawUrl, config, flags);
     const prData = await pr.getPullRequest({ config, ...parsed });
     ({ org, project, repo } = parsed);
     sourceRef = prData.sourceRefName.replace(/^refs\/heads\//, '');
     targetRef = prData.targetRefName.replace(/^refs\/heads\//, '');
-  } else {
-    die(`Expected a pr or pr-compare URL but got type '${parsed.type}'.`);
   }
 
   const diff = await pr.getBranchDiff({ config, org, project, repo, sourceRef, targetRef });
@@ -265,9 +307,11 @@ async function cmdPrDiff(rawUrl, config, flags = {}) {
 
   if (!changes.length) return;
 
-  const patchMode = flags.patch === true;
+  // Unified diff is the default (that is what a review needs); --full / --content
+  // restores the whole-file dump of every changed file from the source branch.
+  const contentMode = flags.full === true || flags.content === true;
 
-  if (patchMode) {
+  if (!contentMode) {
     console.log('\nFetching unified diffs...');
     const results = [];
     for (const c of changes) {
@@ -351,14 +395,14 @@ async function cmdPrList(rawRepo, flags, config) {
   }
 }
 
-async function cmdPrComments(rawUrl, config) {
-  const p = needUrl(rawUrl, 'pr');
+async function cmdPrComments(rawUrl, config, flags = {}) {
+  const p = needPrUrlOrId(rawUrl, config, flags);
   const data = await pr.getComments({ config, ...p });
   fmt.printCommentThreads(data);
 }
 
-async function cmdPrAbandon(rawUrl, config) {
-  const p = needUrl(rawUrl, 'pr');
+async function cmdPrAbandon(rawUrl, config, flags = {}) {
+  const p = needPrUrlOrId(rawUrl, config, flags);
   await pr.abandonPullRequest({ config, ...p });
   console.log(`PR #${p.prId} abandoned. (Branches remain — delete them separately if needed.)`);
 }
@@ -440,7 +484,7 @@ async function cmdPrComment(rawUrl, text, flags, config) {
     die(`Could not read --body-file "${flags['body-file']}": ${e.message}`);
   }
   if (!content.trim()) die('Comment body file is empty.');
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   let filePath = normalizeAzureRepoPath(flags.file);
   const lineNumber = flags.line ? parseInt(flags.line, 10) : null;
   let side = 'right';
@@ -470,7 +514,7 @@ async function cmdPrComment(rawUrl, text, flags, config) {
 }
 
 async function cmdPrSetDesc(rawUrl, text, flags, config) {
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   let description = (text && text !== true) ? unescapeDescription(text) : null;
   if (flags['body-file']) {
     try { description = require('fs').readFileSync(flags['body-file'], 'utf8'); }
@@ -496,7 +540,7 @@ async function cmdPrDeleteThread(rawUrl, threadIdStr, flags, config) {
   if (!threadIdStr) die('Missing threadId argument.');
   const threadId = parseInt(threadIdStr, 10);
   if (isNaN(threadId)) die(`Invalid threadId: ${threadIdStr}`);
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   const commentId = flags.comment ? parseInt(flags.comment, 10) : 1;
   try {
     await pr.deleteComment({ config, ...p, threadId, commentId });
@@ -525,7 +569,7 @@ async function cmdPrReply(rawUrl, threadIdStr, text, flags, config) {
     die(`Could not read --body-file "${flags['body-file']}": ${e.message}`);
   }
   if (!content.trim()) die('Reply body file is empty.');
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   const parentCommentId = flags.comment ? parseInt(flags.comment, 10) : 1;
   const result = await pr.replyToThread({ config, ...p, threadId, content, parentCommentId });
   console.log(`Reply posted in thread ${threadId} (comment id ${result.id}).`);
@@ -548,17 +592,17 @@ async function cmdPrEditComment(rawUrl, threadIdStr, text, flags, config) {
     die(`Could not read --body-file "${flags['body-file']}": ${e.message}`);
   }
   if (!content.trim()) die('Comment body file is empty.');
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   const commentId = flags.comment ? parseInt(flags.comment, 10) : 1;
   await pr.editComment({ config, ...p, threadId, commentId, content });
   console.log(`Comment ${commentId} in thread ${threadId} updated.`);
 }
 
-async function cmdPrCloseThread(rawUrl, threadIdStr, config) {
+async function cmdPrCloseThread(rawUrl, threadIdStr, config, flags = {}) {
   if (!threadIdStr) die('Missing threadId argument.');
   const threadId = parseInt(threadIdStr, 10);
   if (isNaN(threadId)) die(`Invalid threadId: ${threadIdStr}`);
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   await pr.updateThread({ config, ...p, threadId, status: 'closed' });
   console.log(`Thread ${threadId} closed.`);
 }
@@ -628,17 +672,34 @@ function wiqlEscape(s) {
   return String(s).replace(/'/g, "''");
 }
 
-async function cmdWiSearch(project, flags, config) {
-  if (!project) die('Usage: wi search <project> [--title-contains <t>] [--type <t>] [--state <s>] [--wiql "<query>"] [--fields a,b,c] [--json]');
+// `wi search [<term>] --project <p>` — the positional is the title search term,
+// the project comes from --project / AZURE_PROJECT / the configured default.
+async function cmdWiSearch(term, flags, config) {
+  const usage = 'Usage: wi search [<title-term>] --project <p> [--type <t>] [--state <s>] [--wiql "<query>"] [--fields a,b,c] [--json]';
+
+  const project = (flags.project && flags.project !== true)
+    ? flags.project
+    : (config.project || null);
+  if (!project) die(
+    `${usage}\n\nNo project. Pass --project "<project>", set AZURE_PROJECT, ` +
+    'or run: azure-connector config --project "<project>"'
+  );
+
+  // --title-contains stays as an explicit alias for the positional term.
+  const titleFlag = (flags['title-contains'] && flags['title-contains'] !== true)
+    ? flags['title-contains'] : null;
+  const positional = (term && term !== true) ? String(term) : null;
+  if (positional && titleFlag && positional !== titleFlag) {
+    die(`${usage}\n\nGot both a positional term ("${positional}") and --title-contains ("${titleFlag}"). Pass one.`);
+  }
+  const title = positional || titleFlag;
 
   let wiql = (flags.wiql && flags.wiql !== true) ? flags.wiql : null;
   if (!wiql) {
     const conds = [`[System.TeamProject] = '${wiqlEscape(project)}'`];
     if (flags.type && flags.type !== true) conds.push(`[System.WorkItemType] = '${wiqlEscape(flags.type)}'`);
     if (flags.state && flags.state !== true) conds.push(`[System.State] = '${wiqlEscape(flags.state)}'`);
-    if (flags['title-contains'] && flags['title-contains'] !== true) {
-      conds.push(`[System.Title] CONTAINS '${wiqlEscape(flags['title-contains'])}'`);
-    }
+    if (title) conds.push(`[System.Title] CONTAINS '${wiqlEscape(title)}'`);
     wiql = `SELECT [System.Id] FROM WorkItems WHERE ${conds.join(' AND ')} ORDER BY [System.Title] ASC`;
   }
 
@@ -819,7 +880,7 @@ async function cmdWiSetState(rawUrl, state, config, flags) {
 
 async function cmdWiLinkPr(rawWiUrl, rawPrUrl, config, flags) {
   const w = needWorkItemUrlOrId(rawWiUrl, config, flags);
-  const pp = needUrl(rawPrUrl, 'pr');
+  const pp = needPrUrlOrId(rawPrUrl, config, flags);
   const prData = await pr.getPullRequest({ config, ...pp });
   const projectId = prData.repository?.project?.id;
   const repoId = prData.repository?.id;
@@ -1316,7 +1377,7 @@ async function cmdPrTimeline(rawUrl, flags, config) {
     return;
   }
 
-  const p = needUrl(rawUrl, 'pr');
+  const p = needPrUrlOrId(rawUrl, config, flags);
   const data = await pr.getPullRequest({ config, ...p });
   const threads = await pr.getComments({ config, ...p });
   const s = pr.summarizePrTimeline(data, threads, now);
@@ -1390,7 +1451,7 @@ function printHelp() {
 azure-connector — Azure DevOps CLI
 
 Usage:
-  azure-connector config [--pat <token>] [--org <org>] [--base-url <url>] [--pat-valid-to <YYYY-MM-DD>] [--pat-name "<name>"] [--pat-warn-days <n>]
+  azure-connector config [--pat <token>] [--org <org>] [--project <p>] [--repo <r>] [--base-url <url>] [--pat-valid-to <YYYY-MM-DD>] [--pat-name "<name>"] [--pat-warn-days <n>]
   azure-connector pat check        # validate the PAT (connectionData) + show name/expiry/days-left
   azure-connector whoami [--profile <name>]                       # verify auth; print the org + visible projects
   azure-connector raw <METHOD> <path|url> [<json>|@<file>]        # raw REST call (path appended to the org base; api-version added)
@@ -1401,11 +1462,11 @@ Usage:
   azure-connector repo get  <name|repo-url> [--project <p>] [--json]          # id, defaultBranch, size, clone urls
   azure-connector repo refs <name|repo-url> [--filter heads/<b>] [--json]     # list refs; empty result = branch does not exist
 
-  azure-connector pr get           <pr-url|pr-create-url>
+  azure-connector pr get           <pr-url|pr-id> [--project <p>] [--repo <r>] [--full] [--json]   # always lists linked work items; --full adds votes + thread counts
   azure-connector pr list          <repo-url> | --project <p> --repo <r> [--status active|completed|abandoned|all] [--target <branch>] [--top <n>] [--since <YYYY-MM-DD>] [--json]
   azure-connector pr create        <repo-url|pr-create-url> --title "<t>" [--source <branch>] [--target <branch>] [--desc "<text>"|--desc-file <path>|--body-file <path>] [--work-items 65019,123] [--draft]
                                    (note: Azure DevOps limits the PR description to 4000 chars)
-  azure-connector pr diff          <pr-url|pr-create-url> [--patch]      Show changed files; --patch emits unified diffs
+  azure-connector pr diff          <pr-url|pr-id> [--full]               Unified diff of every changed file; --full dumps whole file contents instead
   azure-connector pr comments      <pr-url>
   azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate]   # Markdown file; inline text is not supported
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
@@ -1420,7 +1481,7 @@ Usage:
                                    # review health for a whole repo: age, days-to-first-vote, and PRs merged with NO vote
 
   azure-connector wi get         <wi-url>
-  azure-connector wi search      <project> [--title-contains <t>] [--type <t>] [--state <s>] [--wiql "<q>"] [--fields a,b] [--json]   # WIQL search; auto-paginates batch fetch
+  azure-connector wi search      [<title-term>] --project <p> [--type <t>] [--state <s>] [--wiql "<q>"] [--fields a,b] [--json]   # WIQL search; auto-paginates batch fetch
   azure-connector wi layout      <wi-url> [--type <wit>]                   # map form labels -> field reference names (discover custom fields, incl. empty ones)
   azure-connector wi fields      <wi-url> [--all] [--filter <substr>]      # list field reference names + values (empty fields are omitted by the API)
   azure-connector wi field       <wi-url> <fieldRef>                       # print one field's raw value (e.g. for an edit round-trip)
@@ -1562,18 +1623,18 @@ async function main() {
 
   if (group === 'pr') {
     if (!sub) { printHelp(); die('Missing pr subcommand.'); }
-    if (sub === 'get')           return cmdPrGet(arg1, config);
+    if (sub === 'get')           return cmdPrGet(arg1, config, flags);
     if (sub === 'list')          return cmdPrList(arg1, flags, config);
     if (sub === 'create')        return cmdPrCreate(arg1, flags, config);
     if (sub === 'diff')          return cmdPrDiff(arg1, config, flags);
-    if (sub === 'comments')      return cmdPrComments(arg1, config);
+    if (sub === 'comments')      return cmdPrComments(arg1, config, flags);
     if (sub === 'comment')       return cmdPrComment(arg1, arg2, flags, config);
     if (sub === 'reply')         return cmdPrReply(arg1, arg2, arg3, flags, config);
     if (sub === 'edit-comment')  return cmdPrEditComment(arg1, arg2, arg3, flags, config);
     if (sub === 'set-desc')      return cmdPrSetDesc(arg1, arg2, flags, config);
-    if (sub === 'abandon')       return cmdPrAbandon(arg1, config);
+    if (sub === 'abandon')       return cmdPrAbandon(arg1, config, flags);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
-    if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config);
+    if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config, flags);
     if (sub === 'timeline')      return cmdPrTimeline(arg1, flags, config);
     die(`Unknown pr subcommand: ${sub}`);
   }
@@ -1629,4 +1690,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, normalizeAzureRepoPath, unescapeDescription };
+module.exports = { parseArgs, normalizeAzureRepoPath, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId };

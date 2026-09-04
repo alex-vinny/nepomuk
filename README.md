@@ -245,15 +245,25 @@ Creates an empty git repo in the given (or configured default) project and print
 #### Get PR metadata
 
 ```bash
-node index.js pr get <pr-url>
+node index.js pr get <pr-url|pr-id> [--project <p>] [--repo <r>] [--full] [--json]
 ```
 
 Example:
 ```bash
 node index.js pr get https://dev.azure.com/contoso/Platform/_git/my-repo/pullrequest/20687
+
+# A bare PR id needs a project + repo: from flags, AZURE_PROJECT/AZURE_REPO,
+# or the defaults saved with `config --project <p> --repo <r>`.
+node index.js pr get 20687 --project Platform --repo my-repo
 ```
 
-Output: title, status, author, source/target branch, creation date.
+Output: title, status, author, source/target branch, creation date, and the **linked
+work items** (`Work items: #123, #456`, or `(none)` — a PR with no work item is a
+finding, so the line is always printed rather than silently omitted).
+
+`--full` adds the review state: each reviewer's vote and the thread counts
+(`total (open, anchored to a file)`). `--json` emits the raw PR payload with
+`workItems` — and, under `--full`, `threads` — merged in.
 
 ---
 
@@ -391,16 +401,21 @@ if needed. Used by the review-simulation harness to tear down throwaway PRs.
 #### Show changed files / diff
 
 ```bash
-# List changed files + stats (default)
-node index.js pr diff <pr-url>
+# List changed files + stats, then a unified diff per file (default)
+node index.js pr diff <pr-url|pr-id>
 
-# Emit unified diffs instead of full source file contents
-node index.js pr diff <pr-url> --patch
+# Dump the whole contents of each changed file instead of a diff
+node index.js pr diff <pr-url|pr-id> --full
 ```
 
-Without `--patch`, the command prints the file list and then the **full contents** of each changed
-file from the source branch. With `--patch`, it fetches both the old (target branch) and new
-(source branch) versions and emits a compact unified diff. Prefer `--patch` for code review.
+By default the command prints the file list and then, for each changed file, fetches both
+the old (target branch) and new (source branch) versions and emits a compact **unified
+diff** — what a code review needs. `--full` (alias `--content`) restores the older
+behaviour of dumping each changed file's whole contents from the source branch; use it when
+you need the surrounding code, not just the change.
+
+> The default flipped in 1.2.0 — it used to print whole files, with `--patch` for the diff.
+> `--patch` is still accepted and is now a no-op, so existing scripts keep working.
 
 ---
 
@@ -492,13 +507,18 @@ the *"you requested N work items which exceeds the limit of 200"* error, even fo
 result sets.
 
 ```bash
-node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <s>] \
+node index.js wi search [<title-term>] --project <p> [--type <t>] [--state <s>] \
   [--wiql "<query>"] [--fields <a,b,c>] [--json]
 ```
 
-- `<project>` — the team project name (e.g. `"MyBoard"`). Required.
-- `--title-contains <t>` / `--type <t>` / `--state <s>` — convenience filters; the command
-  builds the WIQL `WHERE` clause from them (single quotes are escaped for WIQL).
+- `<title-term>` — the positional argument is the **title search term**, not the project.
+  Optional; omit it to list everything matching the other filters.
+- `--project <p>` — the team project (e.g. `"MyBoard"`). Required, but falls back to
+  `AZURE_PROJECT` or the default saved with `config --project`.
+- `--title-contains <t>` — explicit alias for the positional term (passing both is an error
+  unless they are identical).
+- `--type <t>` / `--state <s>` — convenience filters; the command builds the WIQL `WHERE`
+  clause from them (single quotes are escaped for WIQL).
 - `--wiql "<query>"` — supply a full WIQL query instead, overriding the filters above.
 - `--fields <a,b,c>` — comma-separated field reference names to hydrate
   (default: `System.Id,System.Title,System.State,System.WorkItemType`).
@@ -507,14 +527,14 @@ node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <
 Examples:
 ```bash
 # All Features whose title contains "PN1" in the MyBoard project
-node index.js wi search "MyBoard" --title-contains "PN1" --type Feature
+node index.js wi search "PN1" --project "MyBoard" --type Feature
 
 # Same, as JSON, pulling description + acceptance criteria too
-node index.js wi search "MyBoard" --title-contains "PN1" --type Feature \
+node index.js wi search "PN1" --project "MyBoard" --type Feature \
   --fields System.Id,System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria --json
 
 # Full control via raw WIQL
-node index.js wi search "Platform" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
+node index.js wi search --project "Platform" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
 ```
 
 > Programmatic use: the underlying `searchWorkItems({ config, org, project, wiql, fields })`
@@ -999,7 +1019,7 @@ per-person productivity metric.
 **1. Throughput by month and work-item type.** Did the queue actually grow, and of what?
 
 ```bash
-node index.js wi search "<project>" --json --fields System.WorkItemType,System.State,Microsoft.VSTS.Common.ClosedDate \
+node index.js wi search --project "<project>" --json --fields System.WorkItemType,System.State,Microsoft.VSTS.Common.ClosedDate \
   --wiql "SELECT [System.Id] FROM WorkItems
           WHERE [System.AreaPath] UNDER '<project>\\<area>'
             AND [System.State] = 'Done'
@@ -1023,7 +1043,7 @@ arrival moment from `wi updates`.
 
 ```bash
 node index.js sprints "<project>" --filter "<sprint prefix>" --json > sprints.json
-node index.js wi search "<project>" --json --wiql "…" | jq -r '.[].id' > ids.txt
+node index.js wi search --project "<project>" --json --wiql "…" | jq -r '.[].id' > ids.txt
 node index.js wi updates --ids @ids.txt --project "<project>" > transitions.tsv
 
 # how many items reached test in the last 2 days of the sprint, or after it closed?
