@@ -9,7 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { extractFieldChanges, timeInState, firstEntry, lastEntry } = require('../lib/workitem');
+const { extractFieldChanges, timeInState, firstEntry, lastEntry, normalizeRelations } = require('../lib/workitem');
 const { flattenIterationTree, flattenTeamIterations, filterIterations, currentIteration } = require('../lib/iteration');
 const { parseVoteEvents, summarizePrTimeline, reviewHealth, voteLabel } = require('../lib/pr');
 const { shortBranch, summarizeRepo } = require('../lib/repo');
@@ -364,4 +364,51 @@ test('summarizeRepo: flattens to the fields callers use, default branch shortene
   assert.strictEqual(r.project, 'Fabrikam');
   assert.strictEqual(r.isDisabled, false);
   assert.strictEqual(summarizeRepo(null), null);
+});
+
+// ── normalizeRelations (wi relations) ────────────────────────────────────────
+// ArtifactLink ids are ONE percent-encoded segment (project%2Frepo%2Fid); the
+// decode must happen before the split, or every PR link comes back mangled.
+
+test('normalizeRelations decodes PR, commit and branch artifact links', () => {
+  const item = { relations: [
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/aaaa-1111%2Fbbbb-2222%2F21308', attributes: { name: 'Pull Request' } },
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/Commit/aaaa-1111%2Fbbbb-2222%2Fdeadbeef', attributes: { name: 'Fixed in Commit' } },
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/aaaa-1111%2Fbbbb-2222%2FGBfeatures%2F65373_midia', attributes: { name: 'Branch' } },
+  ] };
+  const [pr21308, commit, branch] = normalizeRelations(item);
+  assert.deepStrictEqual(
+    { kind: pr21308.kind, target: pr21308.target, repoId: pr21308.repoId, projectId: pr21308.projectId },
+    { kind: 'pr', target: '21308', repoId: 'bbbb-2222', projectId: 'aaaa-1111' }
+  );
+  assert.strictEqual(commit.kind, 'commit');
+  assert.strictEqual(commit.target, 'deadbeef');
+  // the GB prefix is Azure's, not part of the branch name — and the name keeps its slashes
+  assert.strictEqual(branch.kind, 'branch');
+  assert.strictEqual(branch.target, 'features/65373_midia');
+});
+
+test('normalizeRelations maps hierarchy/related links to work-item ids and keeps the rest', () => {
+  const item = { relations: [
+    { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/65631' },
+    { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/65988' },
+    { rel: 'System.LinkTypes.Related', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/64000' },
+    { rel: 'AttachedFile', url: 'https://dev.azure.com/evuptec/_apis/wit/attachments/xyz', attributes: { name: 'print.png' } },
+    { rel: 'Hyperlink', url: 'https://example.com/doc' },
+    { rel: 'Some.Custom-Forward', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/61000' },
+  ] };
+  const got = normalizeRelations(item).map((r) => `${r.kind}:${r.target}`);
+  assert.deepStrictEqual(got, [
+    'parent:65631',
+    'child:65988',
+    'related:64000',
+    'attachment:print.png',
+    'hyperlink:https://example.com/doc',
+    'Some.Custom-Forward:61000',
+  ]);
+});
+
+test('normalizeRelations survives an item without relations', () => {
+  assert.deepStrictEqual(normalizeRelations({}), []);
+  assert.deepStrictEqual(normalizeRelations({ relations: [] }), []);
 });
