@@ -48,6 +48,7 @@ const build = require('./lib/build');
 // handlers, and a shadowed module reference fails at call time, not at load.
 const iterationLib = require('./lib/iteration');
 const repoLib = require('./lib/repo');
+const links = require('./lib/links');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,50 @@ function parseArgs(argv) {
     }
   }
   return { args, flags };
+}
+
+// Every flag any command reads. parseArgs accepts anything that starts with `--`,
+// so a typo (`--jsn`, `--porject`) used to be absorbed in silence and the command
+// ran with the flag simply not applied — `wi get --json` printing human text and
+// exiting 0 is the shape of that bug.
+//
+// This WARNS and does not exit: rejecting unknown flags outright would break
+// existing scripted calls that pass something harmless. Promote to a hard failure
+// once real usage has run clean.
+const KNOWN_FLAGS = new Set([
+  'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'as-comment', 'assignee',
+  'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
+  'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
+  'fields', 'file', 'filter', 'force', 'full', 'h', 'help', 'hours', 'ids', 'json', 'line',
+  'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'pat',
+  'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
+  'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
+  'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
+]);
+
+function warnUnknownFlags(flags, known = KNOWN_FLAGS) {
+  const unknown = Object.keys(flags || {}).filter((k) => !known.has(k));
+  for (const k of unknown) {
+    const near = [...known].find((c) => levenshtein(k, c) <= 2);
+    console.error(`warning: unknown flag --${k}${near ? ` (did you mean --${near}?)` : ''} — it was ignored.`);
+  }
+  return unknown;
+}
+
+// Small edit distance, capped: only used to suggest a correction in a warning.
+function levenshtein(a, b) {
+  if (Math.abs(a.length - b.length) > 2) return 99;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
+    }
+  }
+  return prev[b.length];
 }
 
 // Convert literal escape sequences like \\n, \\t, \\r into real characters when the
@@ -407,13 +452,25 @@ async function cmdPrAbandon(rawUrl, config, flags = {}) {
   console.log(`PR #${p.prId} abandoned. (Branches remain — delete them separately if needed.)`);
 }
 
+// Thin network wrapper around pr.threadsAnchoredAt — kept separate so the matching
+// rule itself stays pure and unit-tested.
+async function findThreadsAt({ config, p, filePath, lineNumber }) {
+  try {
+    const data = await pr.getComments({ config, ...p });
+    return pr.threadsAnchoredAt(data, filePath, lineNumber);
+  } catch (e) {
+    console.error(`  note: could not check for duplicate threads (${e.message}); posting anyway.`);
+    return [];
+  }
+}
+
 // Resolve an inline-comment anchor against the PR's LATEST iteration so a comment
 // never lands on a phantom line. Auto-corrects file-path casing/leading-slash,
 // picks the correct side (right for add/edit, left for delete), and verifies the
 // line exists on that side. Throws a clear, actionable error when it can't.
-async function resolveInlineAnchor({ config, p, filePath, lineNumber }) {
+async function resolveInlineAnchor({ config, p, filePath, lineNumber, iterationsResp }) {
   const warnings = [];
-  const its = await pr.getIterations({ config, ...p });
+  const its = iterationsResp || await pr.getIterations({ config, ...p });
   const iterations = (its && its.value) || [];
   if (!iterations.length) {
     throw new Error(`PR #${p.prId} has no iterations (no commits?). Cannot anchor an inline comment.`);
@@ -489,13 +546,52 @@ async function cmdPrComment(rawUrl, text, flags, config) {
   const lineNumber = flags.line ? parseInt(flags.line, 10) : null;
   let side = 'right';
 
+  // --expect-head: refuse to post when the PR has moved since the diff was read.
+  // This is the guard --dry-run cannot give you: a shifted anchor still validates,
+  // so a comment lands quietly on whatever now occupies that line.
+  let iterationsResp = null;
+  const expectHead = (flags['expect-head'] && flags['expect-head'] !== true) ? flags['expect-head'] : null;
+  if (flags['expect-head'] === true) {
+    die('--expect-head needs the commit sha you reviewed, e.g. --expect-head b31b63dc89. '
+      + 'Get it from `pr diff --json` or from the iteration you based the review on.');
+  }
+  if (expectHead) {
+    iterationsResp = await pr.getIterations({ config, ...p });
+    const head = pr.latestHeadCommit(iterationsResp);
+    const verdict = pr.checkExpectedHead(head, expectHead);
+    if (!verdict.ok && verdict.reason === 'malformed') {
+      die(`--expect-head "${expectHead}" is not a commit sha (expected 7-40 hex characters).`);
+    }
+    if (!verdict.ok) {
+      die(`PR #${p.prId} head has MOVED since you read the diff.\n`
+        + `  reviewed: ${verdict.expected}\n`
+        + `  current:  ${verdict.actual || '(unknown)'}\n`
+        + 'Nothing was posted. Line numbers from the old diff may now point at different code — '
+        + 're-run git-diff-analysis with --force, re-check the anchors, then post against the new head.');
+    }
+    console.error(`  note: head confirmed at ${verdict.actual} (matched ${verdict.expected}).`);
+  }
+
   // Self-correcting anchor: validate/repair the file+line against the PR's latest
   // iteration before posting (skip with --no-validate for the old blind behavior).
   if (filePath && !flags['no-validate']) {
-    const anchor = await resolveInlineAnchor({ config, p, filePath, lineNumber });
+    const anchor = await resolveInlineAnchor({ config, p, filePath, lineNumber, iterationsResp });
     filePath = anchor.path;
     side = anchor.side;
     anchor.warnings.forEach((w) => console.error(`  note: ${w}`));
+  }
+
+  // A second thread on a line that already has one is nearly always a repeat of a
+  // finding, not a new one — and nothing in the flow surfaces it, so it used to be
+  // caught by grepping `pr comments` by hand on a PR with 47 threads.
+  if (filePath && !flags['allow-duplicate']) {
+    const existing = await findThreadsAt({ config, p, filePath, lineNumber });
+    if (existing.length) {
+      const where = `${filePath}:${lineNumber ?? '(file-level)'}`;
+      die(`${existing.length} thread(s) already anchored at ${where}:\n`
+        + existing.map((t) => `  thread ${t.id}  ${t.status || 'active'}  ${t.firstLine}`).join('\n')
+        + '\nNothing was posted. If this really is a separate finding, re-run with --allow-duplicate.');
+    }
   }
 
   if (flags['dry-run']) {
@@ -510,6 +606,47 @@ async function cmdPrComment(rawUrl, text, flags, config) {
   if (result.threadContext?.filePath) {
     const loc = result.threadContext.rightFileStart?.line || result.threadContext.leftFileStart?.line;
     console.log(`Location: ${result.threadContext.filePath}:${loc ?? ''} [${side} side]`);
+  }
+}
+
+// `pr link` / `wi link` — emit the canonical reference line instead of retyping it.
+// The project comes from the PR's own repository object / the work item's Area path
+// root; it is never assumed, because several EVUP repos live outside ELOS and work
+// items are split between the `EVUP` and `Kanban EL` boards. A hand-built link with
+// the wrong project segment has already been published once.
+async function cmdPrLink(rawUrl, flags, config) {
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const data = await pr.getPullRequest({ config, ...p });
+  const project = data.repository?.project?.name || p.project;
+  const repo = data.repository?.name || p.repo;
+  let wiId = (flags.wi && flags.wi !== true) ? flags.wi : null;
+  if (!wiId && !flags['no-wi']) {
+    try {
+      const wis = await pr.getPullRequestWorkItems({ config, ...p });
+      wiId = (wis && wis[0] && wis[0].id) || null;
+    } catch { /* a PR with no work item is a finding, not an error — leave the tag off */ }
+  }
+  const line = links.prLinkLine({ org: p.org || config.org, project, repo, prId: p.prId, title: data.title, wiId });
+  console.log(line);
+  if (!wiId) console.error('  note: no linked work item — the [PBI ...] tag was omitted.');
+}
+
+async function cmdWiLink(rawUrl, flags, config) {
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const data = await wi.getWorkItem({ config, ...p });
+  const f = data.fields || {};
+  const project = links.projectFromAreaPath(f['System.AreaPath']) || p.project;
+  if (!project) die('Could not resolve the project: the work item has no System.AreaPath. Pass --project.');
+  const line = links.wiLinkLine({
+    org: p.org || config.org,
+    project,
+    wiId: p.id,
+    title: f['System.Title'],
+    type: flags['no-type'] ? null : f['System.WorkItemType'],
+  });
+  console.log(line);
+  if (p.project && project !== p.project) {
+    console.error(`  note: project resolved from the Area path as "${project}" (you passed "${p.project}").`);
   }
 }
 
@@ -872,11 +1009,76 @@ async function cmdWiDeleteComment(rawUrl, commentIdStr, config, flags) {
   console.log(`Work item ${p.id} comment ${commentId} deleted.`);
 }
 
+// A transition can be blocked by a field the item never had to fill before. The bare
+// PATCH surfaced that as a raw TF401320 with no hint of which field or which values,
+// so the fix was guesswork. Preflight with validateOnly=true (runs the real rule
+// engine, writes nothing), then name the field and print its allowed values.
 async function cmdWiSetState(rawUrl, state, config, flags) {
   if (!state) die('Missing state argument. e.g. "In Progress", "Aguardando CodeReview", "Done".');
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const ops = [{ op: 'add', path: '/fields/System.State', value: state }];
+
+  if (!flags['no-preflight']) {
+    try {
+      await wi.validateUpdate({ config, ...p, ops });
+    } catch (e) {
+      await explainStateRejection({ config, p, state, error: e, flags });
+      return;
+    }
+    if (flags['dry-run']) {
+      console.log(`DRY RUN — validated only. #${p.id} would move to "${state}".`);
+      return;
+    }
+  } else if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing written (preflight skipped by --no-preflight).`);
+    return;
+  }
+
   await wi.setState({ config, ...p, state });
   console.log(`Work item ${p.id} set to "${state}".`);
+}
+
+// Turn a rule-validation rejection into something actionable: which field, and what
+// it will accept. Falls back to the raw error whenever the scrape finds nothing —
+// an unexplained error beats a confidently wrong explanation.
+async function explainStateRejection({ config, p, state, error, flags }) {
+  const msg = String(error && error.message ? error.message : error);
+  console.error(`Cannot move #${p.id} to "${state}" — the board rejected it. Nothing was written.\n`);
+  const { referenceNames, labels } = wi.parseRuleValidationErrors(msg);
+
+  let type = (flags.type && flags.type !== true) ? flags.type : null;
+  if (!type) {
+    try { type = (await wi.getWorkItem({ config, ...p })).fields?.['System.WorkItemType']; } catch { /* keep going */ }
+  }
+
+  const explained = [];
+  for (const ref of referenceNames) {
+    if (!type || !p.project) break;
+    try {
+      const def = await wi.getFieldDefinition({ config, org: p.org, project: p.project, type, field: ref });
+      const allowed = def.allowedValues || [];
+      explained.push({ ref, name: def.name, required: def.alwaysRequired, allowed });
+    } catch { /* not a field on this WIT, or no metadata — skip it */ }
+  }
+
+  if (explained.length) {
+    for (const f of explained) {
+      console.error(`  ${f.name || f.ref}  (${f.ref})`);
+      if (f.allowed.length) {
+        console.error('    accepts: ' + f.allowed.map((v) => `"${v}"`).join(', '));
+        console.error(`    set it with: wi set-field ${p.id} ${f.ref} "<value>"`);
+      } else {
+        console.error('    free text — no picklist.');
+      }
+    }
+    console.error('');
+  } else if (labels.length) {
+    console.error(`  Field(s) named in the rejection: ${labels.join(', ')}`);
+    console.error(`  Find the reference name with: wi layout ${p.id}\n`);
+  }
+
+  console.error('Azure said:\n' + msg.split('\n').map((l) => '  ' + l).join('\n'));
+  process.exitCode = 1;
 }
 
 async function cmdWiLinkPr(rawWiUrl, rawPrUrl, config, flags) {
@@ -942,6 +1144,68 @@ async function cmdWiSetEstimate(rawUrl, hoursStr, config, flags) {
   ];
   await wi.updateWorkItem({ config, ...p, ops });
   console.log(`Work item #${p.id} estimate set to ${hours}h.`);
+}
+
+// `wi complete` — the closing move that `set-estimate` is not. set-estimate opens a
+// task (OriginalEstimate + RemainingWork); nothing closed it, so nine tasks were
+// closed by hand. Boards that gate `Done` on CompletedWork (Task, Bug Task) reject
+// the transition until this runs.
+async function cmdWiComplete(rawUrl, flags, config) {
+  const raw = (flags.hours != null && flags.hours !== true) ? flags.hours : null;
+  if (raw == null) {
+    die('Missing --hours. Usage: wi complete <wi-url|id> --hours <n>\n'
+      + 'Use --hours 0 when the task was closed without delivery — the record should not claim work that did not happen.');
+  }
+  const hours = parseFloat(raw);
+  if (isNaN(hours) || hours < 0) die(`Invalid --hours: ${raw}`);
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const ops = [
+    { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.CompletedWork', value: hours },
+    { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.RemainingWork', value: 0 },
+  ];
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing written to #${p.id}.`);
+    console.log(`Would set CompletedWork = ${hours}, RemainingWork = 0.`);
+    return;
+  }
+  await wi.updateWorkItem({ config, ...p, ops });
+  console.log(`Work item #${p.id}: CompletedWork = ${hours}h, RemainingWork = 0.`);
+}
+
+// `wi missing` — which fields the form declares but the item does not answer.
+// The API omits empty fields entirely, so `wi fields` alone cannot tell you; the
+// cross-check used to be manual. Placeholders ('.', '-', 'n/a') are reported
+// separately because they read as filled everywhere else.
+async function cmdWiMissing(rawUrl, flags, config) {
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const item = await wi.getWorkItem({ config, ...p });
+  const type = (flags.type && flags.type !== true) ? flags.type : item.fields?.['System.WorkItemType'];
+  const fields = await wi.getContentFields({
+    config,
+    ...p,
+    type,
+    onlyCustom: !flags.all,
+    longFormOnly: !flags.all,
+  });
+  if (flags.json) { console.log(JSON.stringify(fields, null, 2)); return; }
+  if (!fields.length) {
+    console.log(`No ${flags.all ? '' : 'custom long-form '}fields on the "${type}" form (or the layout could not be read).`);
+    return;
+  }
+  const missing = fields.filter((f) => f.state === 'empty');
+  const placeholder = fields.filter((f) => f.state === 'placeholder');
+  const filled = fields.filter((f) => f.state === 'filled');
+  console.log(`#${p.id} (${type}) — ${filled.length} answered, ${missing.length} empty, ${placeholder.length} placeholder.\n`);
+  if (missing.length) {
+    console.log('EMPTY:');
+    for (const f of missing) console.log(`  "${f.label}"  ->  ${f.referenceName}`);
+  }
+  if (placeholder.length) {
+    console.log(`${missing.length ? '\n' : ''}PLACEHOLDER (counts as filled on the board, says nothing):`);
+    for (const f of placeholder) console.log(`  "${f.label}"  ->  ${f.referenceName}`);
+  }
+  if (!missing.length && !placeholder.length) console.log('Nothing missing.');
+  if (!flags.all) console.error('\n(Custom long-form fields only. Use --all for every control on the form.)');
 }
 
 async function cmdWiAttachments(rawUrl, config, flags) {
@@ -1300,10 +1564,48 @@ async function cmdWiRelations(rawUrl, flags, config) {
   if (flags.json) { console.log(JSON.stringify(rels, null, 2)); return; }
   if (!rels.length) { console.log(`No ${wanted ? wanted.join(',') + ' ' : ''}relation(s) on #${p.id}.`); return; }
   console.log(`${rels.length} relation(s) on #${p.id}:`);
+  const names = await resolveRepoNames(rels, config, p, flags);
   for (const r of rels) {
-    const extra = (r.repoId ? `  repo=${r.repoId}` : '') + (r.name ? `  (${r.name})` : '');
+    const repo = r.repoId ? (names.get(r.repoId) || r.repoId) : null;
+    const extra = (repo ? `  repo=${repo}` : '') + (r.name ? `  (${r.name})` : '');
     console.log(`  ${String(r.kind).padEnd(12)} ${r.target}${extra}`);
   }
+}
+
+// An artifact link carries the repository GUID, not its name — so a PR family used
+// to be unpicked by hand against repos-map, and a guessed --project turned into a
+// misleading TF401019 ("does not exist") on the next call. getRepo() takes a name
+// OR an id, so one lookup per distinct GUID settles it; results are cached on disk
+// because these mappings never change.
+async function resolveRepoNames(rels, config, p, flags = {}) {
+  const out = new Map();
+  const ids = [...new Set(rels.map((r) => r.repoId).filter((id) => id && /^[0-9a-f-]{36}$/i.test(id)))];
+  if (!ids.length || flags['no-resolve']) return out;
+  const cache = loadRepoCache();
+  let dirty = false;
+  for (const id of ids) {
+    if (cache[id]) { out.set(id, cache[id]); continue; }
+    try {
+      const repo = await repoLib.getRepo({ config, org: p.org, project: p.project, repo: id });
+      const label = repo.project?.name ? `${repo.project.name}/${repo.name}` : repo.name;
+      if (label) { out.set(id, label); cache[id] = label; dirty = true; }
+    } catch { /* foreign org, deleted repo, or no permission — show the GUID */ }
+  }
+  if (dirty) saveRepoCache(cache);
+  return out;
+}
+
+function repoCachePath() {
+  const home = process.env.USERPROFILE || process.env.HOME || '.';
+  return path.join(home, '.azure-connector-repos.json');
+}
+
+function loadRepoCache() {
+  try { return JSON.parse(fs.readFileSync(repoCachePath(), 'utf8')); } catch { return {}; }
+}
+
+function saveRepoCache(cache) {
+  try { fs.writeFileSync(repoCachePath(), JSON.stringify(cache, null, 2)); } catch { /* cache is an optimisation */ }
 }
 
 async function cmdSprints(project, flags, config) {
@@ -1564,6 +1866,8 @@ async function main() {
     process.exit(0);
   }
 
+  warnUnknownFlags(flags);
+
   const [group, sub, arg1, arg2, arg3] = args;
 
   if (group === 'config') {
@@ -1629,6 +1933,7 @@ async function main() {
     if (sub === 'create')        return cmdPrCreate(arg1, flags, config);
     if (sub === 'diff')          return cmdPrDiff(arg1, config, flags);
     if (sub === 'comments')      return cmdPrComments(arg1, config, flags);
+    if (sub === 'link')          return cmdPrLink(arg1, flags, config);
     if (sub === 'comment')       return cmdPrComment(arg1, arg2, flags, config);
     if (sub === 'reply')         return cmdPrReply(arg1, arg2, arg3, flags, config);
     if (sub === 'edit-comment')  return cmdPrEditComment(arg1, arg2, arg3, flags, config);
@@ -1660,6 +1965,9 @@ async function main() {
     if (sub === 'download')    return cmdWiDownload(arg1, arg2, flags, config);
     if (sub === 'updates' || sub === 'history') return cmdWiUpdates(arg1, flags, config);
     if (sub === 'relations') return cmdWiRelations(arg1, flags, config);
+    if (sub === 'link')        return cmdWiLink(arg1, flags, config);
+    if (sub === 'missing')     return cmdWiMissing(arg1, flags, config);
+    if (sub === 'complete')    return cmdWiComplete(arg1, flags, config);
     die(`Unknown wi subcommand: ${sub}`);
   }
 
