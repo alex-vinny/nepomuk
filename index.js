@@ -49,6 +49,7 @@ const build = require('./lib/build');
 const iterationLib = require('./lib/iteration');
 const repoLib = require('./lib/repo');
 const links = require('./lib/links');
+const verify = require('./lib/verify');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ const KNOWN_FLAGS = new Set([
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
+  'against', 'batch', 'verify',
 ]);
 
 function warnUnknownFlags(flags, known = KNOWN_FLAGS) {
@@ -527,7 +529,112 @@ async function resolveInlineAnchor({ config, p, filePath, lineNumber, iterations
   return { path: canonicalPath, line: lineNumber, side, warnings };
 }
 
+/**
+ * `pr comment --batch <manifest.json>` — validate every anchor first, then post.
+ *
+ * The property this buys, together with --expect-head: EITHER THE WHOLE REVIEW
+ * LANDS AGAINST THE HEAD YOU REVIEWED, OR NOTHING DOES. Posting one at a time in a
+ * shell loop meant a failure at item 5 of 13 left the review half-published with no
+ * record of where it stopped.
+ *
+ * Manifest: an array of items, or { expectHead, comments: [...] }.
+ * Each item: { file, line, bodyFile } — bodyFile keeps rich text out of the shell,
+ * which is the same reason inline text is refused everywhere else.
+ */
+async function cmdPrCommentBatch(rawUrl, flags, config) {
+  const manifestPath = flags.batch;
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
+  catch (e) { die(`Could not read --batch "${manifestPath}": ${e.message}`); }
+
+  const items = Array.isArray(manifest) ? manifest : (manifest.comments || []);
+  if (!items.length) die(`--batch "${manifestPath}" contains no comments.`);
+  const expectHead = (flags['expect-head'] && flags['expect-head'] !== true)
+    ? flags['expect-head'] : (Array.isArray(manifest) ? null : manifest.expectHead);
+
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const base = path.dirname(path.resolve(manifestPath));
+
+  // ── phase 1: validate everything, post nothing ────────────────────────────
+  const iterationsResp = await pr.getIterations({ config, ...p });
+  const head = pr.latestHeadCommit(iterationsResp);
+  if (expectHead) {
+    const v = pr.checkExpectedHead(head, expectHead);
+    if (!v.ok) {
+      die(`PR #${p.prId} head has MOVED since the review was written.\n`
+        + `  reviewed: ${v.expected}\n  current:  ${v.actual || '(unknown)'}\n`
+        + `Nothing was posted — all ${items.length} comment(s) were held back.`);
+    }
+  }
+  console.error(`Validating ${items.length} comment(s) against head ${String(head).slice(0, 10)}…`);
+
+  const existing = await pr.getComments({ config, ...p }).catch(() => null);
+  const prepared = [];
+  const problems = [];
+  for (const [i, item] of items.entries()) {
+    const label = `#${i + 1}`;
+    try {
+      if (!item.bodyFile) throw new Error('missing "bodyFile"');
+      const bodyPath = path.isAbsolute(item.bodyFile) ? item.bodyFile : path.join(base, item.bodyFile);
+      const content = fs.readFileSync(bodyPath, 'utf8');
+      if (!content.trim()) throw new Error(`body file "${item.bodyFile}" is empty`);
+
+      let filePath = normalizeAzureRepoPath(item.file);
+      const lineNumber = item.line != null ? parseInt(item.line, 10) : null;
+      let side = 'right';
+      if (filePath) {
+        const anchor = await resolveInlineAnchor({ config, p, filePath, lineNumber, iterationsResp });
+        filePath = anchor.path;
+        side = anchor.side;
+        anchor.warnings.forEach((w) => console.error(`  ${label} note: ${w}`));
+        if (existing && !flags['allow-duplicate']) {
+          const dup = pr.threadsAnchoredAt(existing, filePath, lineNumber);
+          if (dup.length) throw new Error(`a thread already exists at ${filePath}:${lineNumber} (thread ${dup[0].id})`);
+        }
+      }
+      prepared.push({ label, content, filePath, lineNumber, side });
+    } catch (e) {
+      problems.push(`  ${label} ${item.file || '(PR-level)'}:${item.line ?? ''} — ${e.message}`);
+    }
+  }
+
+  if (problems.length) {
+    die(`${problems.length} of ${items.length} comment(s) failed validation:\n${problems.join('\n')}\n`
+      + 'Nothing was posted. Fix the manifest and re-run — a half-posted review is worse than none.');
+  }
+  console.error(`  ✓ all ${prepared.length} anchor(s) valid.`);
+
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — ${prepared.length} comment(s) would be posted to PR #${p.prId}:`);
+    for (const c of prepared) {
+      console.log(`  ${c.label} ${c.filePath ? `${c.filePath}:${c.lineNumber ?? '(file)'} [${c.side}]` : 'PR-level'}`
+        + `  (${c.content.length} chars)`);
+    }
+    return;
+  }
+
+  // ── phase 2: post ─────────────────────────────────────────────────────────
+  const posted = [];
+  for (const c of prepared) {
+    try {
+      const r = await pr.addComment({ config, ...p, content: c.content, filePath: c.filePath, lineNumber: c.lineNumber, side: c.side });
+      posted.push({ label: c.label, threadId: r.id, where: c.filePath ? `${c.filePath}:${c.lineNumber ?? ''}` : 'PR-level' });
+      console.log(`  ${c.label} posted — thread ${r.id}`);
+    } catch (e) {
+      // Validation passed, so a failure here is a transport/permission problem.
+      // Report exactly what did land: silence would leave a partial review untracked.
+      console.error(`\n  ${c.label} FAILED after ${posted.length} comment(s) were already posted: ${e.message}`);
+      console.error('  Already posted (do NOT re-run the whole batch — you would duplicate these):');
+      posted.forEach((x) => console.error(`    ${x.label} thread ${x.threadId}  ${x.where}`));
+      process.exitCode = 1;
+      return;
+    }
+  }
+  console.log(`\n${posted.length} comment(s) posted to PR #${p.prId}.`);
+}
+
 async function cmdPrComment(rawUrl, text, flags, config) {
+  if (flags.batch) return cmdPrCommentBatch(rawUrl, flags, config);
   if (text && text !== true) {
     die('Inline text is not supported for PR comments. Write the body to a Markdown file and use --body-file <path>.');
   }
@@ -894,8 +1001,50 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
   }
   if (content === '' && !flags['allow-empty']) die('Missing value. Provide it inline or via --body-file <path> (use --allow-empty to clear a field).');
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
+
+  // --verify: refuse a rewrite that silently drops a fact, or that carries markup
+  // the work-item form will not render. Compared against the live value by default,
+  // or an offline baseline with --against (for a report or wiki page).
+  if (flags.verify || flags.against) {
+    let baseline = '';
+    if (flags.against && flags.against !== true) {
+      try { baseline = fs.readFileSync(flags.against, 'utf8'); }
+      catch (e) { die(`Could not read --against "${flags.against}": ${e.message}`); }
+    } else {
+      const live = await wi.getWorkItem({ config, ...p });
+      baseline = (live.fields || {})[field] || '';
+    }
+    const verdict = verify.verifyFieldWrite({ before: baseline, after: content });
+    reportVerifyVerdict(verdict, field, flags);
+    if (!verdict.ok && !flags.force) {
+      die('Nothing was written. Fix the draft, or re-run with --force if you have decided the change is right.');
+    }
+  }
+
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing written to #${p.id}.`);
+    console.log(`Would set "${field}" to ${content.length} char(s).`);
+    return;
+  }
   const res = await wi.setField({ config, ...p, field, value: content });
   console.log(`Work item ${p.id} field "${field}" updated (rev ${res.rev}).`);
+}
+
+function reportVerifyVerdict(verdict, field, flags) {
+  const { lost, forbidden, truncatedBaseline, counts } = verdict;
+  console.error(`verify "${field}": ${counts.beforeChars} -> ${counts.afterChars} chars`);
+  if (truncatedBaseline) {
+    console.error(`  ⚠  The CURRENT value is exactly ${verify.TRUNCATION_BYTES} bytes — Azure's truncation length.`);
+    console.error('     It is almost certainly cut, so a comparison against it would invent losses.');
+    console.error('     Fact-loss checking was SKIPPED. Read the field in the browser before overwriting it.');
+  }
+  for (const [kind, items] of Object.entries(lost)) {
+    console.error(`  ✗ ${kind} present now and missing from the draft: ${items.join(', ')}`);
+  }
+  for (const f of forbidden) {
+    console.error(`  ✗ ${f.name} — ${f.fix}`);
+  }
+  if (verdict.ok) console.error('  ✓ no facts lost, no forbidden markup.');
 }
 
 async function cmdWiLayout(rawUrl, flags, config) {
