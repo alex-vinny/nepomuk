@@ -245,15 +245,25 @@ Creates an empty git repo in the given (or configured default) project and print
 #### Get PR metadata
 
 ```bash
-node index.js pr get <pr-url>
+node index.js pr get <pr-url|pr-id> [--project <p>] [--repo <r>] [--full] [--json]
 ```
 
 Example:
 ```bash
 node index.js pr get https://dev.azure.com/contoso/Platform/_git/my-repo/pullrequest/20687
+
+# A bare PR id needs a project + repo: from flags, AZURE_PROJECT/AZURE_REPO,
+# or the defaults saved with `config --project <p> --repo <r>`.
+node index.js pr get 20687 --project Platform --repo my-repo
 ```
 
-Output: title, status, author, source/target branch, creation date.
+Output: title, status, author, source/target branch, creation date, and the **linked
+work items** (`Work items: #123, #456`, or `(none)` — a PR with no work item is a
+finding, so the line is always printed rather than silently omitted).
+
+`--full` adds the review state: each reviewer's vote and the thread counts
+(`total (open, anchored to a file)`). `--json` emits the raw PR payload with
+`workItems` — and, under `--full`, `threads` — merged in.
 
 ---
 
@@ -391,16 +401,21 @@ if needed. Used by the review-simulation harness to tear down throwaway PRs.
 #### Show changed files / diff
 
 ```bash
-# List changed files + stats (default)
-node index.js pr diff <pr-url>
+# List changed files + stats, then a unified diff per file (default)
+node index.js pr diff <pr-url|pr-id>
 
-# Emit unified diffs instead of full source file contents
-node index.js pr diff <pr-url> --patch
+# Dump the whole contents of each changed file instead of a diff
+node index.js pr diff <pr-url|pr-id> --full
 ```
 
-Without `--patch`, the command prints the file list and then the **full contents** of each changed
-file from the source branch. With `--patch`, it fetches both the old (target branch) and new
-(source branch) versions and emits a compact unified diff. Prefer `--patch` for code review.
+By default the command prints the file list and then, for each changed file, fetches both
+the old (target branch) and new (source branch) versions and emits a compact **unified
+diff** — what a code review needs. `--full` (alias `--content`) restores the older
+behaviour of dumping each changed file's whole contents from the source branch; use it when
+you need the surrounding code, not just the change.
+
+> The default flipped in 1.2.0 — it used to print whole files, with `--patch` for the diff.
+> `--patch` is still accepted and is now a no-op, so existing scripts keep working.
 
 ---
 
@@ -492,13 +507,18 @@ the *"you requested N work items which exceeds the limit of 200"* error, even fo
 result sets.
 
 ```bash
-node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <s>] \
+node index.js wi search [<title-term>] --project <p> [--type <t>] [--state <s>] \
   [--wiql "<query>"] [--fields <a,b,c>] [--json]
 ```
 
-- `<project>` — the team project name (e.g. `"MyBoard"`). Required.
-- `--title-contains <t>` / `--type <t>` / `--state <s>` — convenience filters; the command
-  builds the WIQL `WHERE` clause from them (single quotes are escaped for WIQL).
+- `<title-term>` — the positional argument is the **title search term**, not the project.
+  Optional; omit it to list everything matching the other filters.
+- `--project <p>` — the team project (e.g. `"MyBoard"`). Required, but falls back to
+  `AZURE_PROJECT` or the default saved with `config --project`.
+- `--title-contains <t>` — explicit alias for the positional term (passing both is an error
+  unless they are identical).
+- `--type <t>` / `--state <s>` — convenience filters; the command builds the WIQL `WHERE`
+  clause from them (single quotes are escaped for WIQL).
 - `--wiql "<query>"` — supply a full WIQL query instead, overriding the filters above.
 - `--fields <a,b,c>` — comma-separated field reference names to hydrate
   (default: `System.Id,System.Title,System.State,System.WorkItemType`).
@@ -507,14 +527,14 @@ node index.js wi search <project> [--title-contains <t>] [--type <t>] [--state <
 Examples:
 ```bash
 # All Features whose title contains "PN1" in the MyBoard project
-node index.js wi search "MyBoard" --title-contains "PN1" --type Feature
+node index.js wi search "PN1" --project "MyBoard" --type Feature
 
 # Same, as JSON, pulling description + acceptance criteria too
-node index.js wi search "MyBoard" --title-contains "PN1" --type Feature \
+node index.js wi search "PN1" --project "MyBoard" --type Feature \
   --fields System.Id,System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria --json
 
 # Full control via raw WIQL
-node index.js wi search "Platform" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
+node index.js wi search --project "Platform" --wiql "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"
 ```
 
 > Programmatic use: the underlying `searchWorkItems({ config, org, project, wiql, fields })`
@@ -745,6 +765,12 @@ Sets `OriginalEstimate` and `RemainingWork` (hours) on an existing work item.
 Use this instead of an inline `node -e` PATCH — the PAT stays inside the tool and is
 never exposed on the command line (inline PATs get blocked as credential leaks).
 
+> ⚠️ **This is the *opening* move, not the closing one.** `set-estimate` writes
+> `OriginalEstimate` + `RemainingWork` — it never touches `CompletedWork`, despite a name that
+> reads like it might. To **close** a task use `wi complete <wi-url|id> --hours N`, which sets
+> `CompletedWork = N` and `RemainingWork = 0`. Boards that require `CompletedWork` to reach
+> `Done` (`Task`, and `Bug Task`) will reject the transition if you only ran `set-estimate`.
+
 ---
 
 #### List attachments
@@ -825,6 +851,35 @@ rather than making every open item look 8000 years old.
 > Scope the call to the project the item lives in. The org-level `workItems/{id}/updates` endpoint
 > can return a truncated history for an item that moved between projects — `--project` (or a
 > configured default) avoids it.
+
+#### `wi relations` — typed links on a work item (the ticket→code bridge)
+
+Lists a work item's relations with the `vstfs:///` artifact URLs **decoded**: linked PRs,
+commits and branches come back as usable ids (`pr 21308  repo=<repoId>`), not opaque URIs.
+This is the first step of any ticket→code measurement — from here, `pr get` / `pr diff`
+take over. Before this command existed, the step needed `raw` plus a script.
+
+```bash
+# One item, human-readable
+node index.js wi relations 65631 --project EVUP
+
+# Only the PR links
+node index.js wi relations 65631 --project EVUP --type pr
+
+# Bulk: one TSV row per relation (id, kind, target, repoId, name).
+# Uses workitemsbatch ($expand=relations, errorPolicy omit): 200 ids per API call.
+node index.js wi search --project EVUP --json --wiql "SELECT [System.Id] FROM WorkItems WHERE …" \
+  | jq -r '.[].id' > ids.txt
+node index.js wi relations --ids @ids.txt --project EVUP --type pr > links.tsv
+```
+
+Kinds: `pr`, `commit`, `branch`, `build`, `parent`, `child`, `related`, `duplicate`,
+`duplicate-of`, `successor`, `predecessor`, `attachment`, `hyperlink`; an unknown `rel`
+passes through verbatim rather than being dropped. `--type` takes a comma list of kinds.
+Ids missing from the batch response (deleted, or living in another project) are reported
+on stderr, never silently dropped — the same lesson as `wi updates --project`.
+
+---
 
 ---
 
@@ -910,7 +965,7 @@ Notes:
 ### `repo` — Repository metadata and refs
 
 ```bash
-node index.js repo list [--project <p>] [--json]                        # omit --project to sweep the org
+node index.js repo list [--project <p>] [--json]                        # omit --project only if no default is configured
 node index.js repo get  <name|repo-url> [--project <p>] [--json]
 node index.js repo refs <name|repo-url> [--filter heads/<b>] [--json]
 ```
@@ -939,6 +994,16 @@ node index.js repo refs Web --project Fabrikam --filter heads/release/2026-06
 ```
 
 Gotchas learned in the field:
+- **`repo list` without `--project` sweeps the org only when no default project is set.** It falls
+  back to the configured `project` (or `AZURE_PROJECT`), so on a configured machine it silently lists
+  one project and a repo that lives elsewhere looks like it does not exist. Enumerate projects with
+  `whoami`, then `repo list --project "<p>"` for each.
+- **A wrong `--project` reads as "does not exist", never as "wrong project".** Repo names, pipeline
+  definition names and bare PR/WI ids are all resolved *inside* a project:
+  `repo get "<r>" --project <wrong>` → `HTTP 404 … TF401019: The Git repository with name or
+  identifier <r> does not exist or you do not have permissions…`, and
+  `build last --definition "<d>" --project <wrong>` → `No pipeline definition named "<d>" in project
+  <wrong>`. Before concluding something was deleted, confirm which project owns it.
 - **Changing a repo's default branch is a repo-property PATCH and needs the repo *id* in the URL,
   not the name** — by name the API returns a misleading `HTTP 400 "The request is invalid."` (not a
   404). Body: `{ "defaultBranch": "refs/heads/main" }`. Get the id from `repo get`. It also requires
@@ -970,7 +1035,7 @@ per-person productivity metric.
 **1. Throughput by month and work-item type.** Did the queue actually grow, and of what?
 
 ```bash
-node index.js wi search "<project>" --json --fields System.WorkItemType,System.State,Microsoft.VSTS.Common.ClosedDate \
+node index.js wi search --project "<project>" --json --fields System.WorkItemType,System.State,Microsoft.VSTS.Common.ClosedDate \
   --wiql "SELECT [System.Id] FROM WorkItems
           WHERE [System.AreaPath] UNDER '<project>\\<area>'
             AND [System.State] = 'Done'
@@ -978,6 +1043,12 @@ node index.js wi search "<project>" --json --fields System.WorkItemType,System.S
   > done.json
 # then group by month × type
 ```
+
+A field trap that costs an afternoon: the closed date lives in
+`Microsoft.VSTS.Common.ClosedDate` — `System.ClosedDate` does **not** exist in this org's
+process, and a WIQL naming it fails. Don't "simplify" the example above, and don't substitute
+`System.ChangedDate`, which moves on any edit. Custom fields go by their reference name, which
+`wi layout` discovers.
 
 Watch for a **taxonomy change** mid-window: if the team started filing "Support Request" where it
 used to file "Bug", a bug count that falls is not quality improving. Group by type before concluding
@@ -988,7 +1059,7 @@ arrival moment from `wi updates`.
 
 ```bash
 node index.js sprints "<project>" --filter "<sprint prefix>" --json > sprints.json
-node index.js wi search "<project>" --json --wiql "…" | jq -r '.[].id' > ids.txt
+node index.js wi search --project "<project>" --json --wiql "…" | jq -r '.[].id' > ids.txt
 node index.js wi updates --ids @ids.txt --project "<project>" > transitions.tsv
 
 # how many items reached test in the last 2 days of the sprint, or after it closed?
@@ -1006,6 +1077,19 @@ node index.js pr timeline --repo <r> --project <p> --status all --top 100
 Read the `NO vote` line first. A high count means merges are not being reviewed at all, which is a
 different problem from *slow* review and needs a different fix — and it is invisible in any per-PR
 view.
+
+**4. Release cadence that survives history cleanup.** Build **records** may be retained for as
+little as 30 days (the org maximum is 731), so counting build records months back silently
+undercounts. The build **number** (`AAAAMMDD.N`) encodes the date and a daily sequence and is
+carried by whatever records survive retention — measure cadence from the numbers (max `N` per
+date), never from the record count:
+
+```bash
+node index.js build list --project "<p>" --definition "<pipeline>" --top 200 --json \
+  | jq -r '.[].buildNumber'
+# 20260830.2 = at least 2 packages generated on 2026-08-30.
+# This measures packages BUILT, not production deployments.
+```
 
 > **A caution that belongs with the numbers.** Commit counts, PR counts and transition counts
 > measure activity, not value. They are sound for spotting a *process* failure (no reviewers, work
@@ -1090,8 +1174,8 @@ threadContext, right/left side), `markdownToHtml` / `stripHtml`, `loadConfig` pr
 and the `build` helpers `normalizeBranchRef` / `buildRerunPayload` (generic variable replay, incl.
 pipelines with no variables) / `summarizeBuild`.
 
-`analytics.test.js` covers the measurement helpers behind `wi updates`, `sprints`, `pr timeline`
-and `repo`. Anything that needs the clock takes `now` as an **argument** rather than reading it —
+`analytics.test.js` covers the measurement helpers behind `wi updates`, `wi relations`,
+`sprints`, `pr timeline` and `repo`. Anything that needs the clock takes `now` as an **argument** rather than reading it —
 that is what keeps the suite deterministic and what lets an old measurement be re-run and produce
 the same numbers. The cases worth knowing about are the ones asserting what must *not* count: a
 same-value rewrite is not a state transition, a year-9999 date is no date, a human comment reading
