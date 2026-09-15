@@ -191,3 +191,85 @@ test('parseRuleValidationErrors: finds nothing rather than inventing a field', (
   assert.deepStrictEqual(referenceNames, []);
   assert.deepStrictEqual(labels, []);
 });
+
+// ── verify (wi set-field --verify) ───────────────────────────────────────────
+const {
+  findLostFacts, findForbiddenMarkup, looksTruncated, verifyFieldWrite, TRUNCATION_BYTES,
+} = require('../lib/verify');
+
+test('findLostFacts: a dropped number is caught — the failure that happened 3x', () => {
+  const before = 'O SolicitarPagamento2 duplicou e cancelou 1 ficha de 2 vendas.';
+  const after = 'O SolicitarPagamento2 duplicou e cancelou a ficha das vendas.';
+  const lost = findLostFacts(before, after);
+  assert.deepStrictEqual(lost.numbers, ['1', '2']);
+});
+
+test('findLostFacts: a dropped !id / #id reference is caught', () => {
+  const lost = findLostFacts('Corrigido em !22838, ver #65631.', 'Corrigido no PR citado.');
+  assert.deepStrictEqual(lost.references, ['!22838', '#65631']);
+});
+
+test('findLostFacts: a dropped link is caught', () => {
+  const lost = findLostFacts('Ver https://dev.azure.com/x/y para detalhe.', 'Ver a documentacao.');
+  assert.deepStrictEqual(lost.links, ['https://dev.azure.com/x/y']);
+});
+
+test('findLostFacts: losing one of several identical numbers still counts', () => {
+  const lost = findLostFacts('tentou 3 vezes, esperou 3s, falhou 3x', 'tentou 3 vezes, falhou 3x');
+  assert.deepStrictEqual(lost.numbers, ['3']);
+});
+
+test('findLostFacts: a pure markup change loses nothing', () => {
+  const lost = findLostFacts('<p>Erro <b>500</b> em !22838</p>', 'Erro 500 em !22838');
+  assert.deepStrictEqual(lost, {});
+});
+
+test('findLostFacts: added facts are not a loss', () => {
+  assert.deepStrictEqual(findLostFacts('Erro 500', 'Erro 500 em !22838, 3 vezes'), {});
+});
+
+test('findForbiddenMarkup: catches what the work-item form will not render', () => {
+  const names = (t) => findForbiddenMarkup(t).map((f) => f.name);
+  assert.ok(names('<p style="color:red">x</p>').includes('inline style attribute'));
+  assert.ok(names('<table><tr><td>a</td></tr></table>').includes('table'));
+  assert.ok(names('## Causa raiz').includes('raw markdown heading'));
+  assert.ok(names('isto e **importante**').includes('raw markdown bold'));
+  assert.ok(names('- primeiro item').includes('raw markdown bullet'));
+  assert.ok(names('```sql\nSELECT 1\n```').includes('markdown code fence'));
+  assert.ok(names('corrigido ✅').includes('emoji'));
+});
+
+test('findForbiddenMarkup: clean HTML passes', () => {
+  assert.deepStrictEqual(findForbiddenMarkup('<p>Causa: <strong>indice ausente</strong></p><ul><li>a</li></ul>'), []);
+});
+
+test('findForbiddenMarkup: every rule carries a remedy, not just a rejection', () => {
+  for (const f of findForbiddenMarkup('## h\n- x\n**b**\n```\n')) {
+    assert.ok(f.fix && f.fix.length > 5, `${f.name} has no fix text`);
+  }
+});
+
+test('looksTruncated: exactly 8192 bytes is the truncation signature', () => {
+  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES)), true);
+  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES - 1)), false);
+  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES + 1)), false);
+  // Byte length, not character length — accents must not fool it.
+  assert.strictEqual(looksTruncated('é'.repeat(TRUNCATION_BYTES / 2)), true);
+});
+
+test('verifyFieldWrite: a truncated baseline skips fact-loss instead of inventing losses', () => {
+  const before = 'x'.repeat(TRUNCATION_BYTES - 5) + ' !999';
+  assert.strictEqual(Buffer.byteLength(before), TRUNCATION_BYTES);
+  const v = verifyFieldWrite({ before, after: 'totally different' });
+  assert.strictEqual(v.truncatedBaseline, true);
+  assert.deepStrictEqual(v.lost, {});
+  assert.strictEqual(v.ok, false);
+});
+
+test('verifyFieldWrite: clean rewrite is ok', () => {
+  const v = verifyFieldWrite({
+    before: '<p>Erro 500 em !22838</p>',
+    after: '<p>Erro <strong>500</strong> observado em !22838.</p>',
+  });
+  assert.strictEqual(v.ok, true);
+});
