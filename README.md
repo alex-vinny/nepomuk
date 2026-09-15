@@ -765,6 +765,12 @@ Sets `OriginalEstimate` and `RemainingWork` (hours) on an existing work item.
 Use this instead of an inline `node -e` PATCH — the PAT stays inside the tool and is
 never exposed on the command line (inline PATs get blocked as credential leaks).
 
+> ⚠️ **This is the *opening* move, not the closing one.** `set-estimate` writes
+> `OriginalEstimate` + `RemainingWork` — it never touches `CompletedWork`, despite a name that
+> reads like it might. To **close** a task use `wi complete <wi-url|id> --hours N`, which sets
+> `CompletedWork = N` and `RemainingWork = 0`. Boards that require `CompletedWork` to reach
+> `Done` (`Task`, and `Bug Task`) will reject the transition if you only ran `set-estimate`.
+
 ---
 
 #### List attachments
@@ -959,7 +965,7 @@ Notes:
 ### `repo` — Repository metadata and refs
 
 ```bash
-node index.js repo list [--project <p>] [--json]                        # omit --project to sweep the org
+node index.js repo list [--project <p>] [--json]                        # omit --project only if no default is configured
 node index.js repo get  <name|repo-url> [--project <p>] [--json]
 node index.js repo refs <name|repo-url> [--filter heads/<b>] [--json]
 ```
@@ -988,6 +994,16 @@ node index.js repo refs Web --project Fabrikam --filter heads/release/2026-06
 ```
 
 Gotchas learned in the field:
+- **`repo list` without `--project` sweeps the org only when no default project is set.** It falls
+  back to the configured `project` (or `AZURE_PROJECT`), so on a configured machine it silently lists
+  one project and a repo that lives elsewhere looks like it does not exist. Enumerate projects with
+  `whoami`, then `repo list --project "<p>"` for each.
+- **A wrong `--project` reads as "does not exist", never as "wrong project".** Repo names, pipeline
+  definition names and bare PR/WI ids are all resolved *inside* a project:
+  `repo get "<r>" --project <wrong>` → `HTTP 404 … TF401019: The Git repository with name or
+  identifier <r> does not exist or you do not have permissions…`, and
+  `build last --definition "<d>" --project <wrong>` → `No pipeline definition named "<d>" in project
+  <wrong>`. Before concluding something was deleted, confirm which project owns it.
 - **Changing a repo's default branch is a repo-property PATCH and needs the repo *id* in the URL,
   not the name** — by name the API returns a misleading `HTTP 400 "The request is invalid."` (not a
   404). Body: `{ "defaultBranch": "refs/heads/main" }`. Get the id from `repo get`. It also requires

@@ -664,6 +664,7 @@ async function cmdPrCreate(rawUrl, flags, config) {
 async function cmdWiGet(raw, config, flags) {
   const p = needWorkItemUrlOrId(raw, config, flags);
   const data = await wi.getWorkItem({ config, ...p });
+  if (flags && flags.json) { console.log(JSON.stringify(data, null, 2)); return; }
   fmt.printWorkItem(data);
 }
 
