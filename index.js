@@ -106,9 +106,18 @@ function parseArgs(argv) {
 // ran with the flag simply not applied — `wi get --json` printing human text and
 // exiting 0 is the shape of that bug.
 //
-// This WARNS and does not exit: rejecting unknown flags outright would break
-// existing scripted calls that pass something harmless. Promote to a hard failure
-// once real usage has run clean.
+// This FAILS rather than warning, because the caller is usually an agent.
+//
+// A human sees a warning scroll past and reacts. An agent reads the exit code and
+// the last line of output: a warning on stderr followed by exit 0 reads as success,
+// so it records "I set --json" / "I passed --yes" and carries the wrong belief into
+// every later step. The failure mode is silent and compounding.
+//
+// A hard error is the opposite: it is unmissable, it names the likely correction,
+// and retrying with the fix costs one call. The usual argument against — breaking
+// existing scripted callers — barely applies here, because those callers are agents
+// that read the error and correct themselves. `--no-strict-flags` is the escape
+// hatch for a genuinely unattended pipeline.
 const KNOWN_FLAGS = new Set([
   'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'as-comment', 'assignee',
   'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
@@ -118,16 +127,44 @@ const KNOWN_FLAGS = new Set([
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
-  'against', 'batch', 'verify',
+  'against', 'batch', 'verify', 'no-strict-flags',
 ]);
 
-function warnUnknownFlags(flags, known = KNOWN_FLAGS) {
-  const unknown = Object.keys(flags || {}).filter((k) => !known.has(k));
-  for (const k of unknown) {
-    const near = [...known].find((c) => levenshtein(k, c) <= 2);
-    console.error(`warning: unknown flag --${k}${near ? ` (did you mean --${near}?)` : ''} — it was ignored.`);
+/**
+ * Pure: unknown flags, each with a spelling suggestion when one is close.
+ *
+ * Picks the CLOSEST candidate, not the first within the threshold — taking the first
+ * makes the suggestion depend on set order, and a wrong suggestion is worse than none
+ * when the caller is an agent that will act on it.
+ */
+function closestFlag(name, known = KNOWN_FLAGS) {
+  let best = null;
+  let bestDistance = 3; // more than 2 edits is not a suggestion
+  for (const candidate of known) {
+    const d = levenshtein(name, candidate);
+    if (d < bestDistance) { best = candidate; bestDistance = d; }
   }
-  return unknown;
+  return best;
+}
+
+function unknownFlags(flags, known = KNOWN_FLAGS) {
+  return Object.keys(flags || {})
+    .filter((k) => !known.has(k))
+    .map((k) => ({ flag: k, suggestion: closestFlag(k, known) }));
+}
+
+function checkUnknownFlags(flags, known = KNOWN_FLAGS) {
+  const unknown = unknownFlags(flags, known);
+  if (!unknown.length) return;
+  const lines = unknown.map(({ flag, suggestion }) =>
+    `  --${flag}${suggestion ? `   did you mean --${suggestion}?` : '   (no close match)'}`);
+  if (flags['no-strict-flags']) {
+    console.error(`warning: ignoring unknown flag(s):\n${lines.join('\n')}`);
+    return;
+  }
+  die(`Unknown flag(s) — nothing was run:\n${lines.join('\n')}\n`
+    + 'An unknown flag is silently dropped, so the command would have run WITHOUT it. '
+    + 'Fix the spelling, or pass --no-strict-flags to proceed anyway.');
 }
 
 // Small edit distance, capped: only used to suggest a correction in a warning.
@@ -2015,7 +2052,7 @@ async function main() {
     process.exit(0);
   }
 
-  warnUnknownFlags(flags);
+  checkUnknownFlags(flags);
 
   const [group, sub, arg1, arg2, arg3] = args;
 
