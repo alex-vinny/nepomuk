@@ -478,9 +478,50 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi link-pr <wi-url\|id> <pr-url\|id>` | — | Adds the ArtifactLink relation. Resolves the PR's project/repo ids automatically; works across projects in one org. **Writes, no dry-run.** |
 | `wi link <url\|id>` | `--no-type` | Prints the canonical reference line, with the project taken from the **root segment of the Area path** — which is always the project name. Warns on stderr when that disagrees with a passed `--project`. Read-only. |
 | `wi attachments <url\|id>` | — | Index, name, comment, download URL. |
+| `wi attach <url\|id> <file>` | `--yes`, `--name <n>`, `--comment "<t>"`, `--allow-duplicate`, `--json` | Uploads the bytes, then links them as an `AttachedFile` relation. **Previews unless `--yes`.** The project is read from the item's Area path, not from `--project`/config — see below. **Writes.** |
 | `wi download <url\|id> [<index\|name>]` | `--out <dir>` | 1-based index or exact file name. The selector may be omitted when there is exactly one attachment. Writes a local file. |
 | `wi updates <url\|id>` (alias `history`) | `--field <ref>` (default `System.State`), `--all-fields`, `--time-in-state`, `--entered "<v>"`, `--ids <a,b,c\|@file>`, `--project`, `--json` | See below. |
 | `wi relations <url\|id>` | `--type <kinds>`, `--ids <a,b,c\|@file>`, `--project`, `--no-resolve`, `--json` | See below. |
+
+#### `wi attach` — putting a file on the item
+
+Two API calls, and **the first one alone is not an attachment**: the upload returns a
+blob `{ id, url }` that nothing references yet, and Azure garbage-collects it. The
+`AttachedFile` relation in the second call is what makes it appear on the item.
+
+```bash
+wi attach 66360 ./report.pdf                                    # preview, exit 0
+wi attach 66360 ./report.pdf --comment "Analysis 2026-09-17" --yes
+```
+
+Three things this command decides for you, each because the obvious alternative fails
+quietly:
+
+- **The project comes from the item's Area path**, not from `--project` or the configured
+  default. A bare id would otherwise inherit whatever `config --project` was last set to;
+  the blob then uploads under one project while the item lives in another. The preview's
+  `projectSource` field says which source won.
+- **A duplicate name is refused** (`--allow-duplicate` to override). Azure keeps both
+  copies without complaint, and `wi download <name>` then resolves to whichever appears
+  first in the relations array — a silently wrong file.
+- **A 0-byte file is refused.** Azure stores it happily; the item shows an attachment
+  that downloads as nothing.
+
+Two Azure DevOps Services limits are enforced client-side, because neither is raisable
+and hitting either costs the whole upload first: **60 MB per attachment** and **100
+attachments per item**. Do not read the 130 MB in the REST reference as the cap — that is
+the *chunked-upload threshold*, reachable only on an on-prem Server whose limit was
+raised (its default is 4 MB).
+
+One knock-on: `name` is a global flag now, so the strict-flag check no longer rejects
+`wi download <id> --name "x.pdf"`. `cmdWiDownload` refuses it explicitly — left
+accepted-and-ignored, the selector would be `undefined` and a single-attachment item
+would quietly download the wrong file and exit 0.
+
+Transport note: `lib/api.js` `request()` sends a **Buffer body as raw bytes** and anything
+else as JSON. That branch is load-bearing — `JSON.stringify(buffer)` produces
+`{"type":"Buffer","data":[...]}`, which Azure accepts with a `200` and stores as a
+corrupt attachment. `test/connector.test.js` pins it against a loopback server.
 
 #### `wi updates` — how an item moved
 
@@ -584,8 +625,11 @@ await wi.setField({ config, org: config.org, project: 'Platform', id: 1234,
 | `lib/verify.js` | Fact-loss and forbidden-markup checks. Pure. |
 | `lib/format.js` | Terminal rendering, `stripHtml`, unified-diff computation. |
 
-**The guards are in the library, not the CLI.** `setField()` runs the render guard, so a
-script gets it for free. `--verify`, `--expect-head` and duplicate detection are CLI-level;
+**The guards are in the library, not the CLI.** `setField()` runs the render guard, and
+`attachFile()` runs `checkAttachment()` for the intrinsic cases (empty file, over the size
+limit, no name), so a script gets both for free. The duplicate-*attachment*-name check
+needs the item's current relations and stays with the caller that already fetched them.
+`--verify`, `--expect-head` and duplicate *thread* detection are CLI-level;
 a script that needs them should call `verify.verifyFieldWrite()`, `pr.checkExpectedHead()`
 and `pr.threadsAnchoredAt()` itself — all three are pure.
 
@@ -633,11 +677,13 @@ same numbers.
 npm test      # or: node --test
 ```
 
-137 tests, Node's built-in `node:test`. **No network, no PAT** — every test is pure.
+152 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+the three transport tests, which drive `request()` against a throwaway `127.0.0.1`
+server on an ephemeral port — the only way to assert that a binary body leaves as bytes.
 
 | File | Covers |
 |---|---|
-| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles, the render guard, `loadConfig` profile resolution, and the `build` helpers. |
+| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles, the render guard, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 

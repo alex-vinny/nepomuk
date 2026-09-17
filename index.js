@@ -25,6 +25,7 @@
  *   wi link-pr  <wi-url> <pr-url>  Link an existing pull request to a work item
  *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>]
  *   wi attachments <wi-url>        List attachments
+ *   wi attach   <wi-url> <file>    Attach a local file (previews unless --yes)
  *   wi download <wi-url>  <n|name>  Download attachment (by index or name)
  *   wiki list --project <project> [--org <org>]  List wikis in a project
  *   wiki pages --project <project> --wiki <wikiIdOrName> [--org <org>]  List wiki pages
@@ -123,7 +124,7 @@ const KNOWN_FLAGS = new Set([
   'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
   'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
   'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'json', 'line',
-  'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'pat',
+  'name', 'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'pat',
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
@@ -1411,7 +1412,88 @@ async function cmdWiAttachments(rawUrl, config, flags) {
   fmt.printAttachments(attachments);
 }
 
+// Attach a local file to a work item. Previews unless --yes: an upload is a write
+// that everyone watching the item sees, and the blob survives removing the link.
+async function cmdWiAttach(rawUrl, filePath, flags, config) {
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  if (!filePath || filePath === true) {
+    die('Usage: wi attach <wi-url|id> <file> [--name <n>] [--comment "<text>"] [--allow-duplicate] [--yes]');
+  }
+  if (!fs.existsSync(filePath)) die(`File not found: ${filePath}`);
+
+  const stat = fs.statSync(filePath);
+  if (stat.isDirectory()) die(`"${filePath}" is a directory. Attach a single file, or zip it first.`);
+
+  const fileName = (flags.name && flags.name !== true) ? flags.name : path.basename(filePath);
+  const comment = (flags.comment && flags.comment !== true) ? flags.comment : '';
+
+  // Read the item itself rather than trusting the configured default project: a bare
+  // id resolves to whatever `config --project` was last set to, and uploading the blob
+  // under one project while the item lives in another is a confusing 404. The area
+  // path's root IS the project name, and this call is needed for the existing
+  // attachments anyway.
+  const item = await wi.getWorkItem({ config, ...p });
+  const fromArea = links.projectFromAreaPath((item.fields || {})['System.AreaPath']);
+  const project = fromArea || p.project;
+  const existing = (item.relations || [])
+    .filter((r) => r.rel === 'AttachedFile')
+    .map((r) => (r.attributes && r.attributes.name) || 'unknown');
+
+  // Same warning cmdWiLink gives: with --yes there is no preview to read, so a
+  // disagreement has to reach stderr or it is never reported at all.
+  if (fromArea && p.project && fromArea !== p.project) {
+    console.error(`note: uploading under "${fromArea}" (the item's Area path), not "${p.project}".`);
+  }
+
+  const check = wi.checkAttachment({
+    fileName,
+    size: stat.size,
+    existingNames: existing,
+    allowDuplicate: Boolean(flags['allow-duplicate']),
+  });
+  if (!check.ok) die(check.message);
+
+  const preview = {
+    workItem: p.id,
+    project,
+    projectSource: fromArea ? "the item's Area path" : 'argument/config (the item has no Area path)',
+    file: filePath,
+    attachAs: fileName,
+    bytes: stat.size,
+    comment: comment || null,
+    existingAttachments: existing,
+  };
+
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing uploaded. Re-run with --yes to attach.\n');
+    console.log(JSON.stringify(preview, null, 2));
+    return;
+  }
+
+  // Read the bytes only once the upload is actually going to happen — a dry run of
+  // a 100 MB attachment should not pull it into memory.
+  const buffer = fs.readFileSync(filePath);
+  const result = await wi.attachFile({ config, org: p.org, project, id: p.id, fileName, buffer, comment });
+
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  const count = result.relations === null ? '' : `, ${result.relations} relation(s) on the item now`;
+  console.log(`Attached "${result.name}" to #${p.id} — ${stat.size} bytes${count}.`);
+  console.log(result.url);
+}
+
 async function cmdWiDownload(rawUrl, selector, flags, config) {
+  // `name` is a valid flag globally (wi attach takes it), so the strict-flag check no
+  // longer catches `wi download <id> --name "x.pdf"` — and that spelling is the obvious
+  // wrong guess here, because the selector is positional. Left alone, --name would
+  // swallow the file name, `selector` would be undefined, and an item with exactly one
+  // attachment would silently download a DIFFERENT file and exit 0.
+  if (flags.name !== undefined) {
+    die('wi download takes the attachment as a positional, not --name:\n'
+      + `  azure-connector wi download ${rawUrl || '<wi-url|id>'} "${flags.name !== true ? flags.name : '<name>'}"`);
+  }
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
   const attachments = await wi.listAttachments({ config, ...p });
   if (!attachments.length) die('No attachments on this work item.');
@@ -1994,6 +2076,8 @@ Usage:
   azure-connector wi link-pr     <wi-url> <pr-url>           # link an existing PR to the work item
   azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]
    azure-connector wi attachments <wi-url>
+   azure-connector wi attach      <wi-url> <file> [--name <n>] [--comment "<text>"] [--allow-duplicate] [--yes] [--json]
+                                   # upload a local file and link it; DRY RUN unless --yes. --name renames it on the item; a name already on the item is refused (Azure would keep both)
    azure-connector wi download    <wi-url> [<index|name>] [--out <dir>]
   azure-connector wi updates     <wi-url> [--field <ref>] [--all-fields] [--time-in-state] [--entered "<State>"] [--json]
                                    # how the item MOVED (default field: System.State). The work item itself only carries its current state.
@@ -2160,6 +2244,7 @@ async function main() {
     if (sub === 'create-task') return cmdWiCreateTask(arg1, arg2, flags, config);
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
+    if (sub === 'attach')      return cmdWiAttach(arg1, arg2, flags, config);
     if (sub === 'download')    return cmdWiDownload(arg1, arg2, flags, config);
     if (sub === 'updates' || sub === 'history') return cmdWiUpdates(arg1, flags, config);
     if (sub === 'relations') return cmdWiRelations(arg1, flags, config);
