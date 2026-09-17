@@ -167,8 +167,8 @@ test('classifyFieldValue: a lone dot is a placeholder, not an answer', () => {
 });
 
 test('classifyFieldValue: real content is filled', () => {
-  assert.strictEqual(classifyFieldValue('Correção em Código Fonte'), 'filled');
-  assert.strictEqual(classifyFieldValue('<p>Índice ausente em PhoneNumber_1</p>'), 'filled');
+  assert.strictEqual(classifyFieldValue('Fixed in source code'), 'filled');
+  assert.strictEqual(classifyFieldValue('<p>Missing index on PhoneNumber_1</p>'), 'filled');
   assert.strictEqual(classifyFieldValue(0), 'filled');
 });
 
@@ -205,8 +205,8 @@ test('findLostFacts: a dropped number is caught — the failure that happened 3x
 });
 
 test('findLostFacts: a dropped !id / #id reference is caught', () => {
-  const lost = findLostFacts('Fixed in !22838, see #65631.', 'Fixed in the PR cited.');
-  assert.deepStrictEqual(lost.references, ['!22838', '#65631']);
+  const lost = findLostFacts('Fixed in !22838, see #64100.', 'Fixed in the PR cited.');
+  assert.deepStrictEqual(lost.references, ['!22838', '#64100']);
 });
 
 test('findLostFacts: a dropped link is caught', () => {

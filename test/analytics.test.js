@@ -390,7 +390,7 @@ test('normalizeRelations decodes PR, commit and branch artifact links', () => {
 
 test('normalizeRelations maps hierarchy/related links to work-item ids and keeps the rest', () => {
   const item = { relations: [
-    { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/65631' },
+    { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/64100' },
     { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/65988' },
     { rel: 'System.LinkTypes.Related', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/64000' },
     { rel: 'AttachedFile', url: 'https://dev.azure.com/contoso/_apis/wit/attachments/xyz', attributes: { name: 'print.png' } },
@@ -399,7 +399,7 @@ test('normalizeRelations maps hierarchy/related links to work-item ids and keeps
   ] };
   const got = normalizeRelations(item).map((r) => `${r.kind}:${r.target}`);
   assert.deepStrictEqual(got, [
-    'parent:65631',
+    'parent:64100',
     'child:65988',
     'related:64000',
     'attachment:print.png',

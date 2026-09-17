@@ -4,6 +4,11 @@ A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, descri
 
 Built as a fallback for when the MCP azure-devops integration is unavailable or unreliable.
 
+> **Calling this from an agent or a script?** Read **[AGENTS.md](AGENTS.md)** instead — it is
+> the operating contract: the complete command × flag matrix, exit codes, stdout/stderr
+> discipline, which commands write, and every guard that can refuse a write. This README is
+> the narrative guide with worked examples.
+
 **Measuring a team's process?** Four commands answer the questions the board cannot:
 [`wi updates`](#wi-updates--how-the-item-moved-state-history) (how an item actually moved),
 [`sprints`](#sprints--iterations-and-their-dates) (the sprint window),
@@ -170,6 +175,38 @@ node index.js config --pat <new-token> --pat-valid-to <YYYY-MM-DD> --pat-name "<
 ```
 
 Expiry overrides via env: `AZURE_PAT_VALID_TO`, `AZURE_PAT_NAME`, `AZURE_PAT_WARN_DAYS`.
+
+### Unknown flags abort the run
+
+`parseArgs` accepts anything starting with `--`, so an unrecognised flag would otherwise be
+dropped in silence and the command would run **without it** — a dropped `--yes` becomes a
+dry run, a dropped `--project` changes which project is addressed. So an unknown flag is a
+hard failure:
+
+```
+$ node index.js wi get 1234 --porject Platform
+ERROR: Unknown flag(s) — nothing was run:
+  --porject   did you mean --project?
+```
+
+Exit 1, and no request is made. The suggestion is the closest known flag within two edits,
+or `(no close match)`. `--no-strict-flags` downgrades this to a warning for an unattended
+pipeline — don't reach for it to get past a typo.
+
+Flag validity is **global, not per-command**: passing a flag some other command reads is
+accepted and ignored.
+
+### Exit codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | Success. |
+| `1` | Any error — bad arguments, unknown flag, auth failure, HTTP error, or a guard refusing a write. |
+| `2` | Only from `wi comment`: the work item has long-form custom fields and neither `--field` nor `--as-comment` was given. Nothing was posted; see [Field-routing gate](#field-routing-gate). |
+
+**stdout carries the answer; stderr carries everything else** — PAT-expiry warnings, retry
+notices, anchor corrections, progress and verdicts. A non-empty stderr does not mean
+failure, so read the exit code. `--json` output is therefore always safe to parse.
 
 ---
 
@@ -349,6 +386,70 @@ node index.js pr comment <pr-url> --body-file ./inline-comment.md --file /src/Se
 >
 > Line numbers are the **new (right-hand) file** line numbers — the same ones `pr diff` prints.
 
+##### Guards on an inline comment
+
+Three checks run before a post, each because the failure it prevents is silent:
+
+```bash
+# Refuse to post if the PR head moved since the diff was read
+node index.js pr comment <pr-url> --body-file ./f.md --file /src/S.cs --line 42 \
+  --expect-head b31b63dc89
+
+# Post a second thread on a line that already has one
+node index.js pr comment <pr-url> --body-file ./f.md --file /src/S.cs --line 42 --allow-duplicate
+```
+
+- **`--expect-head <sha>`** is the guard `--dry-run` cannot give you: a shifted anchor
+  still validates, so without it the comment lands quietly on whatever now occupies that
+  line. Pass the commit you reviewed — 7–40 hex characters, matched by prefix.
+- **Duplicate detection** stops and lists the existing threads when one is already
+  anchored at that `file:line`, since a second thread there is nearly always a repeat of a
+  finding. `--allow-duplicate` overrides.
+- **Anchor resolution** corrects the path's casing, picks the side, and rejects a
+  non-existent line. `--no-validate` posts blindly.
+
+##### Post a whole review atomically (`--batch`)
+
+```bash
+node index.js pr comment <pr-url> --batch ./review/manifest.json
+node index.js pr comment <pr-url> --batch ./review/manifest.json --dry-run
+```
+
+Validates **every** anchor, the head and duplicates before posting **anything**. Together
+with an expected head that gives the property a shell loop cannot: either the whole review
+lands against the head that was reviewed, or nothing does.
+
+```json
+{
+  "expectHead": "b31b63dc89",
+  "comments": [
+    { "bodyFile": "00-summary.md" },
+    { "file": "/src/Service.cs", "line": 42, "bodyFile": "01-null-deref.md" }
+  ]
+}
+```
+
+`bodyFile` is required per item and resolves relative to the manifest's own directory.
+Omit `file`/`line` for a PR-level comment. A bare array works too, in which case pass
+`--expect-head` on the command line.
+
+If validation fails, every problem is listed and nothing is posted. If a post fails
+*after* validation passed, the thread ids that already landed are printed — **do not
+re-run the whole batch**, you would duplicate them.
+
+---
+
+#### Reply inside an existing thread
+
+```bash
+node index.js pr reply <pr-url> <threadId> --body-file ./reply.md
+node index.js pr reply <pr-url> <threadId> --body-file ./reply.md --comment 2
+```
+
+Adds a comment inside thread `<threadId>` rather than starting a new one — the right call
+when answering a reviewer. Thread ids come from `pr comments`. `--comment <n>` sets the
+parent comment (default 1). Markdown body, `--body-file` only.
+
 ---
 
 #### Edit a PR comment in place
@@ -408,6 +509,36 @@ file's whole contents from the source branch; use it when you need the surroundi
 just the change.
 
 > `--patch` is accepted as a no-op, since the unified diff is already the default.
+
+---
+
+#### `pr link` / `wi link` — the canonical reference line
+
+```bash
+node index.js pr link <pr-url|id>            # resolves the linked work item too
+node index.js pr link <pr-url|id> --wi 1234  # name the work item explicitly
+node index.js pr link <pr-url|id> --no-wi    # omit the [PBI ...] tag
+node index.js wi link <wi-url|id>            # work item counterpart
+node index.js wi link <wi-url|id> --no-type  # omit the [Bug] tag
+```
+
+Prints one line, ready to paste into a review or a report:
+
+```
+[Pull Request 22838](https://dev.azure.com/contoso/Platform/_git/svc-kanban/pullrequest/22838 "https://dev.azure.com/contoso/platform/_git/svc-kanban/pullrequest/22838"): [svc-kanban][PBI 67209] Fix chat ordering
+```
+
+Both are **read-only**. The point is that the project is *resolved*, never assumed: for a
+PR from its own `repository.project` object, for a work item from the **root segment of
+its Area path**, which is always the project name. An org can hold repos across several
+projects and work items split across more than one board, so a hand-built link is one
+wrong segment away from pointing nowhere. `wi link` warns on stderr when the resolved
+project disagrees with a `--project` you passed.
+
+The link title is the same URL lowercased — what Azure DevOps itself produces when you
+paste a link. `[<Repo>]` is the real repository from the PR, not the service name that
+sounds like it matches the subject. With no linked work item the `[PBI ...]` group is
+omitted rather than printed empty, because a PR with no work item is a finding.
 
 ---
 
@@ -568,6 +699,8 @@ node index.js wi field <wi-url> <fieldRef>
 node index.js wi set-field <wi-url> <fieldRef> ["<value>"]
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path>
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --from-markdown
+node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --verify [--against <path>]
+node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --dry-run
 node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a field
 ```
 
@@ -580,9 +713,44 @@ node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a fie
 > **A multi-line field write that still carries raw Markdown is refused**, before the request is
 > sent and before a `--dry-run` preview claims success. The check runs in `lib/workitem.js`
 > (`assertRenderableFieldValue`), not in the CLI, so a one-off script calling `setField` /
-> `createWorkItem` directly is covered too — that is exactly how WI 67322 got 20 KB of raw
-> markdown into `System.Description`, asterisks and pipe rows visible on the board. Override with
-> `--force` (CLI) or `{ force: true }` (lib) once you have decided the body is right as-is.
+> `createWorkItem` directly is covered too — a guard that only exists one layer above the API is
+> a guard that scripts skip. It rejects inline `style=`, `<table>`, raw Markdown
+> headings/bold/bullets, code fences and emoji, and each rejection names a remedy. Single-line
+> values are never inspected. Override with `--force` (CLI) or `{ force: true }` (lib) once you
+> have decided the body is right as-is.
+
+##### `--verify` — refuse a rewrite that loses a fact
+
+```bash
+# Compare the draft against the field's CURRENT live value
+node index.js wi set-field <wi-url> Custom.RootCause --body-file ./draft.html --verify
+
+# Compare against a local baseline instead (an offline report, a wiki page)
+node index.js wi set-field <wi-url> Custom.RootCause --body-file ./draft.html \
+  --against ./previous.html
+```
+
+A rewrite that reads better can silently drop a number, a quoted value, a link or a
+`!id`/`#id` reference. Prose review does not catch that; a machine comparison does. Facts
+are compared as a **multiset** over four categories — numbers, `!id`/`#id` references,
+links, and `"quoted"` spans — with HTML stripped from both sides, so a pure markup change
+is not read as a content change. Losing one of three identical numbers still fails.
+
+The verdict goes to stderr:
+
+```
+verify "Custom.RootCause": 4120 -> 3980 chars
+  ✗ numbers present now and missing from the draft: 500, 22838
+  ✗ table — tables render inconsistently — use a <ul> list.
+```
+
+Nothing is written on a failed verdict; `--force` proceeds anyway.
+
+> ⚠️ **The truncation trap.** Azure silently truncates a long field value at exactly 8192
+> bytes. A baseline that comes back at exactly that length is almost certainly cut, so
+> fact-loss checking is **skipped** and said so loudly — comparing against a cut value would
+> invent losses and the check would lie with confidence. Read the field in the browser
+> before overwriting it.
 
 Examples:
 ```bash
@@ -776,6 +944,48 @@ never exposed on the command line (inline PATs get blocked as credential leaks).
 > reads like it might. To **close** a task use `wi complete <wi-url|id> --hours N`, which sets
 > `CompletedWork = N` and `RemainingWork = 0`. Boards that require `CompletedWork` to reach
 > `Done` (`Task`, and `Bug Task`) will reject the transition if you only ran `set-estimate`.
+
+---
+
+#### `wi complete` — close a task with the work it took
+
+```bash
+node index.js wi complete <wi-url|id> --hours 6
+node index.js wi complete <wi-url|id> --hours 6 --dry-run
+```
+
+Sets `CompletedWork = n` and `RemainingWork = 0` — the closing move to `set-estimate`'s
+opening one. A board that gates `Done` on `CompletedWork` rejects the transition until this
+has run.
+
+> Pass `--hours 0` when the task was closed without delivery. The record should not claim
+> work that did not happen.
+
+---
+
+#### `wi missing` — which fields the form declares but the item never answered
+
+```bash
+node index.js wi missing <wi-url|id>            # custom long-form controls (default)
+node index.js wi missing <wi-url|id> --all      # every control on the form
+node index.js wi missing <wi-url|id> --json
+```
+
+The API omits empty fields entirely, so `wi fields` cannot answer "what is unanswered?" —
+this joins the **form layout** to the current values and reports three states:
+
+```
+#1234 (Bug) — 2 answered, 1 empty, 1 placeholder.
+
+EMPTY:
+  "Implemented Solution"  ->  Custom.ImplementedSolution
+
+PLACEHOLDER (counts as filled on the board, says nothing):
+  "Root Cause"  ->  Custom.RootCause
+```
+
+`placeholder` is reported separately on purpose: a field holding a lone `.`, `-`, `n/a`,
+`tbd` or `none` reads as filled everywhere else on the board while saying nothing.
 
 ---
 
@@ -1152,7 +1362,8 @@ All calls use API version `7.1`. Key endpoints used:
 azure-connector/
 ├── index.js          # CLI entry point and command router
 ├── package.json
-├── README.md
+├── README.md         # this guide
+├── AGENTS.md         # operating contract for agents/scripts: flags, exit codes, guards
 ├── test/
 │   ├── connector.test.js   # unit tests (node:test)
 │   ├── analytics.test.js   # unit tests for the measurement helpers

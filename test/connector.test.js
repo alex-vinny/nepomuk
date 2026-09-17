@@ -308,10 +308,10 @@ test('loadConfig: patEnv yields empty PAT when the env var is unset', () => {
 
 // ── markdownToHtml: tables, ordered lists, quotes ─────────────────────────────
 test('markdownToHtml: pipe table becomes a real <table> with styled cells', () => {
-  const html = markdownToHtml('| # | Cenário |\n|---|---|\n| 1 | Só uma condição |\n| 2 | Duas condições |');
+  const html = markdownToHtml('| # | Scenario |\n|---|---|\n| 1 | One condition |\n| 2 | Two conditions |');
   assert.ok(html.includes('<table'), 'emits a table element');
   assert.ok(html.includes('<th style="border:1px solid #ccc;padding:6px;text-align:left">#</th>'), 'header cell is styled');
-  assert.ok(html.includes('>Só uma condição</td>'), 'body cell content preserved');
+  assert.ok(html.includes('>One condition</td>'), 'body cell content preserved');
   assert.strictEqual((html.match(/<tr/g) || []).length, 3, 'one header row + two body rows');
   assert.ok(!html.includes('|---|'), 'delimiter row is consumed, not printed');
   assert.ok(!/<p>\s*\|/.test(html), 'rows are not left as literal paragraphs');
@@ -355,10 +355,10 @@ test('markdownToHtml: numbered list becomes <ol>, separate from an adjacent <ul>
 });
 
 test('markdownToHtml: block quote becomes <blockquote> without stray breaks', () => {
-  const html = markdownToHtml('> Atenção ao caso 3.');
+  const html = markdownToHtml('> Mind case 3.');
   assert.ok(html.includes('<blockquote>'));
-  assert.ok(html.includes('<p>Atenção ao caso 3.</p>'));
-  assert.ok(!html.includes('&gt; Atenção'), 'the marker is consumed, not escaped into the text');
+  assert.ok(html.includes('<p>Mind case 3.</p>'));
+  assert.ok(!html.includes('&gt; Mind'), 'the marker is consumed, not escaped into the text');
   assert.ok(!/<br\/>\s*<\/blockquote>/.test(html), 'no trailing <br/> inside the quote');
 });
 
@@ -385,9 +385,9 @@ test('markdownToFieldHtml: a table becomes a list, losing no cell', () => {
 });
 
 test('markdownToFieldHtml: a non-empty first header prefixes the row label', () => {
-  const html = markdownToFieldHtml('| # | Cenário |\n|---|---|\n| 1 | Só uma condição |');
+  const html = markdownToFieldHtml('| # | Scenario |\n|---|---|\n| 1 | One condition |');
   assert.ok(html.includes('<b>#: 1</b>'), 'the first column header is not dropped');
-  assert.ok(html.includes('Só uma condição'));
+  assert.ok(html.includes('One condition'));
 });
 
 test('markdownToFieldHtml: header-only table degrades to a line, not a torn block', () => {
@@ -408,16 +408,16 @@ test('markdownToFieldHtml: comment profile is untouched by the field profile', (
   assert.ok(markdownToHtml(md).includes('style='), 'comments still get the inline styles');
 });
 
-// ── assertRenderableFieldValue: the guard that WI 67322 needed ───────────────
+// ── assertRenderableFieldValue: the pre-write render guard ───────────────
 test('assertRenderableFieldValue: refuses raw markdown in a long-form field', () => {
   assert.throws(
-    () => assertRenderableFieldValue('System.Description', '## Título\n\n**negrito**'),
+    () => assertRenderableFieldValue('System.Description', '## Title\n\n**bold**'),
     /raw markdown heading[\s\S]*markdownToFieldHtml/
   );
 });
 
 test('assertRenderableFieldValue: converted HTML passes', () => {
-  const html = markdownToFieldHtml('## Título\n\n**negrito**\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+  const html = markdownToFieldHtml('## Title\n\n**bold**\n\n| a | b |\n|---|---|\n| 1 | 2 |');
   assert.doesNotThrow(() => assertRenderableFieldValue('System.Description', html));
 });
 
@@ -433,12 +433,12 @@ test('assertRenderableFieldValue: force is the deliberate override', () => {
 const { stripHtml } = require('../lib/format');
 
 test('stripHtml: table cells keep a visible separator and rows stay on their own line', () => {
-  const html = '<table><thead><tr><th>#</th><th>Cenário</th></tr></thead>'
-    + '<tbody><tr><td>1</td><td>Uma condição</td></tr><tr><td>2</td><td>Duas condições</td></tr></tbody></table>';
+  const html = '<table><thead><tr><th>#</th><th>Scenario</th></tr></thead>'
+    + '<tbody><tr><td>1</td><td>One condition</td></tr><tr><td>2</td><td>Two conditions</td></tr></tbody></table>';
   const text = stripHtml(html);
-  assert.ok(text.includes('# | Cenário'), 'header cells separated');
-  assert.ok(text.includes('1 | Uma condição'), 'body cells separated');
-  assert.ok(!text.includes('CenárioUma'), 'rows do not run together');
+  assert.ok(text.includes('# | Scenario'), 'header cells separated');
+  assert.ok(text.includes('1 | One condition'), 'body cells separated');
+  assert.ok(!text.includes('ScenarioOne'), 'rows do not run together');
   assert.strictEqual(text.split('\n').filter((l) => l.includes('|')).length, 3, 'one line per row');
 });
 
