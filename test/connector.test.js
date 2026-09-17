@@ -1,6 +1,8 @@
 'use strict';
 
-// Unit tests for azure-connector's pure helpers. No network, no PAT.
+// Unit tests for azure-connector's pure helpers. No Azure, no PAT.
+// Two transport tests drive request() against a throwaway 127.0.0.1 server on an
+// ephemeral port — the only way to assert that a Buffer body leaves as bytes.
 // Run: node --test   (from the azure-connector dir)
 
 const { test } = require('node:test');
@@ -10,7 +12,12 @@ const { parseArgs, normalizeAzureRepoPath } = require('../index.js');
 const { parseUrl } = require('../lib/config');
 const { buildThreadBody } = require('../lib/pr');
 const { normalizeBranchRef, buildRerunPayload, summarizeBuild } = require('../lib/build');
-const { markdownToHtml, markdownToFieldHtml, assertRenderableFieldValue } = require('../lib/workitem');
+const {
+  markdownToHtml, markdownToFieldHtml, assertRenderableFieldValue,
+  attachmentUploadUrl, attachmentRelation, checkAttachment, attachFile, ATTACHMENT_MAX_BYTES,
+} = require('../lib/workitem');
+const { request } = require('../lib/api');
+const http = require('node:http');
 
 // ── parseArgs ────────────────────────────────────────────────────────────────
 test('parseArgs: separates positionals, valued flags, and boolean flags', () => {
@@ -527,4 +534,178 @@ test('printPullRequest: --full renders votes and thread counts; vote 0 is "no vo
   assert.match(out, /Bo — no vote/);
   // 4 threads, 1 deleted → 3 active; of those, 2 are status 'active' (open).
   assert.match(out, /Threads:\s+3 \(2 open, 2 anchored to a file\)/);
+});
+
+// ── wi attach: the pure helpers ───────────────────────────────────────────────
+
+test('attachmentUploadUrl: percent-encodes the file name — real report names have spaces and accents', () => {
+  const u = attachmentUploadUrl({ base: 'https://dev.azure.com/acme', project: 'My Project', fileName: 'Relatório #3 final.pdf' });
+  assert.match(u, /\/acme\/My%20Project\/_apis\/wit\/attachments\?/);
+  assert.match(u, /fileName=Relat%C3%B3rio%20%233%20final\.pdf/);
+  assert.match(u, /api-version=7\.1/);
+});
+
+test('attachmentUploadUrl: no project falls back to the org-level endpoint', () => {
+  const u = attachmentUploadUrl({ base: 'https://dev.azure.com/acme', fileName: 'a.pdf' });
+  assert.match(u, /^https:\/\/dev\.azure\.com\/acme\/_apis\/wit\/attachments\?/);
+});
+
+test('attachmentRelation: builds the AttachedFile patch value, comment only when there is one', () => {
+  const withComment = attachmentRelation({ url: 'https://x/attachments/abc', name: 'a.pdf', comment: 'evidence' });
+  assert.deepStrictEqual(withComment, {
+    rel: 'AttachedFile',
+    url: 'https://x/attachments/abc',
+    attributes: { name: 'a.pdf', comment: 'evidence' },
+  });
+  const bare = attachmentRelation({ url: 'https://x/attachments/abc', name: 'a.pdf', comment: '' });
+  assert.deepStrictEqual(bare.attributes, { name: 'a.pdf' });
+});
+
+test('checkAttachment: a normal file passes', () => {
+  assert.strictEqual(checkAttachment({ fileName: 'a.pdf', size: 1024 }).ok, true);
+});
+
+test('checkAttachment: an empty file is refused — Azure stores it and it downloads as nothing', () => {
+  const r = checkAttachment({ fileName: 'a.pdf', size: 0 });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.reason, 'empty');
+});
+
+test("checkAttachment: the cap is Azure DevOps Services' 60 MB, not the 130 MB chunked-upload threshold", () => {
+  assert.strictEqual(ATTACHMENT_MAX_BYTES, 60 * 1024 * 1024);
+  const r = checkAttachment({ fileName: 'big.zip', size: ATTACHMENT_MAX_BYTES + 1 });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.reason, 'too-large');
+  assert.match(r.message, /60 MB/);
+  assert.strictEqual(checkAttachment({ fileName: 'big.zip', size: ATTACHMENT_MAX_BYTES }).ok, true);
+  // An 85 MB file used to pass and then be rejected by Azure after the whole upload.
+  assert.strictEqual(checkAttachment({ fileName: 'trace.zip', size: 85 * 1024 * 1024 }).ok, false);
+});
+
+test('checkAttachment: a missing size is refused — both numeric guards pass on undefined', () => {
+  // `undefined === 0` and `undefined > MAX` are each false, so without an explicit
+  // type check an unsized upload sails past the one guard meant to stop it.
+  assert.strictEqual(checkAttachment({ fileName: 'a.pdf' }).reason, 'no-size');
+  assert.strictEqual(checkAttachment({ fileName: 'a.pdf', size: '1024' }).reason, 'no-size');
+  assert.strictEqual(checkAttachment({ fileName: 'a.pdf', size: NaN }).reason, 'no-size');
+});
+
+test('checkAttachment: an item already holding 100 attachments is refused (Azure allows 100)', () => {
+  const full = Array.from({ length: 100 }, (_, i) => `f${i}.pdf`);
+  const r = checkAttachment({ fileName: 'new.pdf', size: 10, existingNames: full });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.reason, 'item-full');
+  assert.strictEqual(checkAttachment({ fileName: 'new.pdf', size: 10, existingNames: full.slice(0, 99) }).ok, true);
+});
+
+test('checkAttachment: a name already on the item is refused, because wi download could not tell the copies apart', () => {
+  const r = checkAttachment({ fileName: 'a.pdf', size: 10, existingNames: ['other.pdf', 'a.pdf'] });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.reason, 'duplicate');
+  assert.strictEqual(checkAttachment({ fileName: 'a.pdf', size: 10, existingNames: ['a.pdf'], allowDuplicate: true }).ok, true);
+});
+
+test('checkAttachment: no file name is refused before the bytes are spent', () => {
+  assert.strictEqual(checkAttachment({ fileName: '', size: 10 }).reason, 'no-name');
+});
+
+// ── api: a Buffer body goes out as bytes, not as JSON ────────────────────────
+// The regression this guards: JSON.stringify(buffer) yields {"type":"Buffer",...},
+// which Azure accepts with a 200 and stores as a corrupt attachment.
+
+test('request: a Buffer body is transmitted byte-for-byte with the caller Content-Type', async () => {
+  const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff, 0xfe, 0x0a]); // %PDF + non-UTF8
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen = { body: Buffer.concat(chunks), type: req.headers['content-type'], length: req.headers['content-length'] };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: 'blob-1', url: 'https://x/attachments/blob-1' }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+
+  try {
+    const out = await request(`http://127.0.0.1:${port}/_apis/wit/attachments?fileName=a.pdf&api-version=7.1`, {
+      method: 'POST',
+      pat: 'x',
+      body: bytes,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
+    assert.deepStrictEqual(out, { id: 'blob-1', url: 'https://x/attachments/blob-1' });
+    assert.strictEqual(seen.type, 'application/octet-stream');
+    assert.strictEqual(seen.length, String(bytes.length));
+    assert.ok(seen.body.equals(bytes), 'the server received exactly the bytes that were sent');
+  } finally {
+    server.close();
+  }
+});
+
+test('request: a plain object body is still JSON, and Content-Length counts bytes not characters', async () => {
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen = { body: Buffer.concat(chunks), type: req.headers['content-type'], length: req.headers['content-length'] };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+
+  try {
+    await request(`http://127.0.0.1:${port}/x`, { method: 'PATCH', pat: 'x', body: { comment: 'ação' } });
+    assert.strictEqual(seen.type, 'application/json');
+    assert.strictEqual(seen.body.toString('utf8'), '{"comment":"ação"}');
+    // 'ação' is 4 characters but 5 bytes — a character count here truncates the request.
+    assert.strictEqual(seen.length, String(Buffer.byteLength('{"comment":"ação"}', 'utf8')));
+  } finally {
+    server.close();
+  }
+});
+
+test('attachFile: the intrinsic guard runs in the library, so a script caller gets it too', async () => {
+  // No network is reached: the guard rejects before the upload.
+  await assert.rejects(
+    () => attachFile({ config: { org: 'acme', baseUrl: 'https://dev.azure.com', pat: 'x' },
+                       project: 'P', id: 1, fileName: 'a.pdf', buffer: Buffer.alloc(0) }),
+    /0 bytes/,
+  );
+});
+
+test('request: a Uint8Array is binary too — Buffer.isBuffer alone would have JSON-ified it', async () => {
+  const view = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0xff]);
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen = Buffer.concat(chunks);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    await request(`http://127.0.0.1:${server.address().port}/x`, {
+      method: 'POST', pat: 'x', body: view, headers: { 'Content-Type': 'application/octet-stream' },
+    });
+    assert.ok(seen.equals(Buffer.from(view)), 'sent as bytes');
+    assert.doesNotMatch(seen.toString('utf8'), /"0":37/, 'not serialised as an index map');
+  } finally {
+    server.close();
+  }
+});
+
+test('attachFile: a string body is refused — .length is characters and the JSON branch would mangle it', async () => {
+  await assert.rejects(
+    () => attachFile({ config: { org: 'acme', baseUrl: 'https://dev.azure.com', pat: 'x' },
+                       project: 'P', id: 1, fileName: 'a.csv', buffer: 'id,name\n1,ação\n' }),
+    /needs a Buffer, got string/,
+  );
 });

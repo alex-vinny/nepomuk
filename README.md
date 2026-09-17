@@ -1,6 +1,6 @@
 # azure-connector
 
-A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, describe, comment, edit), work items (PBI/Bug/Task reading, commenting, editing, state, tasks), attachment download, repositories, iterations, wiki, and pipeline builds. Multi-org via profiles; a raw REST passthrough for anything not yet wrapped.
+A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, describe, comment, edit), work items (PBI/Bug/Task reading, commenting, editing, state, tasks), attachment upload and download, repositories, iterations, wiki, and pipeline builds. Multi-org via profiles; a raw REST passthrough for anything not yet wrapped.
 
 Built as a fallback for when the MCP azure-devops integration is unavailable or unreliable.
 
@@ -999,6 +999,55 @@ Output: index, name, comment, download URL for each attachment.
 
 ---
 
+#### Attach a file
+
+```bash
+# Preview only — nothing is uploaded
+node index.js wi attach <wi-url|id> ./report.pdf
+
+# Actually attach it, with a comment describing what it is
+node index.js wi attach 66360 ./report.pdf --comment "Analysis of 2026-09-17"  --yes
+
+# Store it under a different name on the item
+node index.js wi attach 66360 ./out/final.pdf --name "Royalties-66360.pdf" --yes
+```
+
+An upload is a write everyone watching the item sees, and removing the link does not
+remove the blob, so the command **previews unless `--yes`** — the preview names the
+target item, the resolved project, the byte count and the attachments already there.
+
+Two behaviours worth knowing:
+
+- **The project comes from the work item, not from your config.** A bare id would
+  otherwise resolve to whatever `config --project` was last set to, and uploading the
+  blob under one project while the item lives in another fails confusingly. The command
+  reads the item's `System.AreaPath` and uses its root; `projectSource` in the preview
+  says which it used.
+- **A name already on the item is refused.** Azure accepts duplicate attachment names
+  without complaint, and then `wi download <name>` silently resolves to whichever copy
+  comes first. Rename with `--name`, or pass `--allow-duplicate` when you really do
+  want two.
+
+Refused before any bytes are sent: a missing file, a directory, a 0-byte file (Azure
+stores it and the item shows an attachment that downloads as nothing), a file over
+**60 MB**, and an item that already holds **100** attachments. Those last two are Azure
+DevOps Services limits and are not raisable, so spending the upload first only buys a
+rejection. (The 130 MB in the REST reference is the chunked-upload threshold, not the
+attachment cap — it applies to an on-prem Server whose limit was raised.)
+
+Also refused: `--name` on `wi download`, where the selector is positional. Left
+accepted-and-ignored it would silently fetch a different file.
+
+| Flag | Effect |
+|---|---|
+| `--yes` | Actually upload. Without it the command previews and exits 0. |
+| `--name <n>` | Name on the work item (default: the file's basename). |
+| `--comment "<text>"` | Attachment comment, shown next to the name in `wi attachments`. |
+| `--allow-duplicate` | Permit a name that is already attached. |
+| `--json` | Print `{ id, url, name, relations }` instead of the human line. |
+
+---
+
 #### Download an attachment
 
 ```bash
@@ -1346,6 +1395,8 @@ All calls use API version `7.1`. Key endpoints used:
 | Edit WI comment | PATCH | `/_apis/wit/workItems/{id}/comments/{commentId}` |
 | Create work item | POST | `/_apis/wit/workitems/${type}` (JSON Patch body) |
 | Update work item | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch body) |
+| Upload attachment | POST | `/_apis/wit/attachments?fileName=...` (raw bytes, `application/octet-stream`) |
+| Link attachment | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch, `AttachedFile` relation) |
 | Download attachment | GET | attachment URL from work item relations |
 | Work item change history | GET | `/_apis/wit/workItems/{id}/updates` (paginated `$top`/`$skip`) |
 | Iteration tree | GET | `/_apis/wit/classificationnodes/iterations?$depth=N` |
@@ -1372,7 +1423,7 @@ azure-connector/
     ├── config.js     # PAT/org config, URL parser
     ├── api.js        # HTTP transport (no external deps)
     ├── pr.js         # Pull request operations + review timeline / vote events
-    ├── workitem.js   # Work item operations, attachment download, change history
+    ├── workitem.js   # Work item operations, attachment upload/download, change history
     ├── iteration.js  # Iterations (sprints) and their date windows
     ├── repo.js       # Repository metadata and refs
     ├── build.js      # Pipeline build list/last/rerun (generic variable replay)
