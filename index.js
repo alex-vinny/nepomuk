@@ -102,9 +102,9 @@ function parseArgs(argv) {
 }
 
 // Every flag any command reads. parseArgs accepts anything that starts with `--`,
-// so a typo (`--jsn`, `--porject`) used to be absorbed in silence and the command
-// ran with the flag simply not applied — `wi get --json` printing human text and
-// exiting 0 is the shape of that bug.
+// so without this check a typo (`--jsn`, `--porject`) is absorbed in silence and the
+// command runs with the flag simply not applied — `wi get --json` printing human text
+// and exiting 0 is the shape of that bug.
 //
 // This FAILS rather than warning, because the caller is usually an agent.
 //
@@ -1345,9 +1345,8 @@ async function cmdWiSetEstimate(rawUrl, hoursStr, config, flags) {
 }
 
 // `wi complete` — the closing move that `set-estimate` is not. set-estimate opens a
-// task (OriginalEstimate + RemainingWork); nothing closed it, so nine tasks were
-// closed by hand. Boards that gate `Done` on CompletedWork (Task, Bug Task) reject
-// the transition until this runs.
+// task (OriginalEstimate + RemainingWork) and never writes CompletedWork. A board that
+// gates `Done` on CompletedWork rejects the transition until this runs.
 async function cmdWiComplete(rawUrl, flags, config) {
   const raw = (flags.hours != null && flags.hours !== true) ? flags.hours : null;
   if (raw == null) {
@@ -1371,9 +1370,9 @@ async function cmdWiComplete(rawUrl, flags, config) {
 }
 
 // `wi missing` — which fields the form declares but the item does not answer.
-// The API omits empty fields entirely, so `wi fields` alone cannot tell you; the
-// cross-check used to be manual. Placeholders ('.', '-', 'n/a') are reported
-// separately because they read as filled everywhere else.
+// The API omits empty fields entirely, so `wi fields` alone cannot tell you: the
+// answer needs the form layout joined to the values. Placeholders ('.', '-', 'n/a')
+// are reported separately because they read as filled everywhere else.
 async function cmdWiMissing(rawUrl, flags, config) {
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
   const item = await wi.getWorkItem({ config, ...p });
@@ -1770,11 +1769,11 @@ async function cmdWiRelations(rawUrl, flags, config) {
   }
 }
 
-// An artifact link carries the repository GUID, not its name — so a PR family used
-// to be unpicked by hand against repos-map, and a guessed --project turned into a
-// misleading TF401019 ("does not exist") on the next call. getRepo() takes a name
-// OR an id, so one lookup per distinct GUID settles it; results are cached on disk
-// because these mappings never change.
+// An artifact link carries the repository GUID, not its name, so unpicking a PR
+// family means mapping GUIDs first — and a guessed --project turns into a misleading
+// TF401019 ("does not exist") on the next call. getRepo() takes a name OR an id, and
+// an id needs no project, which is the point: the project is what is being asked.
+// Results are cached on disk because these mappings never change.
 async function resolveRepoNames(rels, config, p, flags = {}) {
   const out = new Map();
   const ids = [...new Set(rels.map((r) => r.repoId).filter((id) => id && /^[0-9a-f-]{36}$/i.test(id)))];
