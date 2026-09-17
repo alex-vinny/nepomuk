@@ -374,7 +374,7 @@ test('normalizeRelations decodes PR, commit and branch artifact links', () => {
   const item = { relations: [
     { rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/aaaa-1111%2Fbbbb-2222%2F21308', attributes: { name: 'Pull Request' } },
     { rel: 'ArtifactLink', url: 'vstfs:///Git/Commit/aaaa-1111%2Fbbbb-2222%2Fdeadbeef', attributes: { name: 'Fixed in Commit' } },
-    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/aaaa-1111%2Fbbbb-2222%2FGBfeatures%2F65373_midia', attributes: { name: 'Branch' } },
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/aaaa-1111%2Fbbbb-2222%2FGBfeatures%2F1234-new-widget', attributes: { name: 'Branch' } },
   ] };
   const [pr21308, commit, branch] = normalizeRelations(item);
   assert.deepStrictEqual(
@@ -385,17 +385,17 @@ test('normalizeRelations decodes PR, commit and branch artifact links', () => {
   assert.strictEqual(commit.target, 'deadbeef');
   // the GB prefix is Azure's, not part of the branch name — and the name keeps its slashes
   assert.strictEqual(branch.kind, 'branch');
-  assert.strictEqual(branch.target, 'features/65373_midia');
+  assert.strictEqual(branch.target, 'features/1234-new-widget');
 });
 
 test('normalizeRelations maps hierarchy/related links to work-item ids and keeps the rest', () => {
   const item = { relations: [
-    { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/65631' },
-    { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/65988' },
-    { rel: 'System.LinkTypes.Related', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/64000' },
-    { rel: 'AttachedFile', url: 'https://dev.azure.com/evuptec/_apis/wit/attachments/xyz', attributes: { name: 'print.png' } },
+    { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/65631' },
+    { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/65988' },
+    { rel: 'System.LinkTypes.Related', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/64000' },
+    { rel: 'AttachedFile', url: 'https://dev.azure.com/contoso/_apis/wit/attachments/xyz', attributes: { name: 'print.png' } },
     { rel: 'Hyperlink', url: 'https://example.com/doc' },
-    { rel: 'Some.Custom-Forward', url: 'https://dev.azure.com/evuptec/_apis/wit/workItems/61000' },
+    { rel: 'Some.Custom-Forward', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/61000' },
   ] };
   const got = normalizeRelations(item).map((r) => `${r.kind}:${r.target}`);
   assert.deepStrictEqual(got, [

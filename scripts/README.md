@@ -1,14 +1,9 @@
-# azure-connector/scripts — helpers standalone
+# azure-connector/scripts — standalone helpers
 
-Scripts que usam a lib do azure-connector (`lib/config.js`, `lib/api.js`) — PAT/org
-carregados de lá, sem hardcode.
+Scripts in this folder reuse the tool's own libraries (`lib/config.js`, `lib/api.js`), so the
+PAT and org are resolved the same way the CLI resolves them — never hardcoded, and never passed
+on a command line.
 
-| Script | Uso |
-|--------|-----|
-| _(vazio)_ | Sem scripts no momento. |
-
-> **Movido:** o antigo `tag-compare.js` (comparar duas tags de um repo) foi portado para o
-> tool **git-diff-analysis** como subcomando Python `tags`:
-> `python git_diff_analysis.py tags "<project>" "<repo>" "<oldTag>" "<newTag>"`
-> (ou `... tags "<repo-url>" "<oldTag>" "<newTag>"`). Ver o README do tool
-> **git-diff-analysis**.
+| Script | Usage |
+|--------|-------|
+| _(none)_ | No scripts at the moment. |

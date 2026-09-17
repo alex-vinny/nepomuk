@@ -58,13 +58,13 @@ test('latestHeadCommit: takes the source side of the last iteration', () => {
 // ── threadsAnchoredAt ────────────────────────────────────────────────────────
 const THREADS = { value: [
   { id: 1, status: 'active', threadContext: { filePath: '/Src/App/Page.tsx', rightFileStart: { line: 42 } },
-    comments: [{ content: '**Crítico** — índice ausente\nmais texto' }] },
+    comments: [{ content: '**Critical** — missing index\nmore text' }] },
   { id: 2, status: 'fixed', threadContext: { filePath: '/Src/App/Page.tsx', rightFileStart: { line: 99 } },
-    comments: [{ content: 'outro achado' }] },
+    comments: [{ content: 'another finding' }] },
   { id: 3, status: 'active', threadContext: { filePath: '/Src/App/Other.tsx', rightFileStart: { line: 42 } },
-    comments: [{ content: 'arquivo diferente' }] },
+    comments: [{ content: 'a different file' }] },
   { id: 4, isDeleted: true, threadContext: { filePath: '/Src/App/Page.tsx', rightFileStart: { line: 42 } },
-    comments: [{ content: 'apagado' }] },
+    comments: [{ content: 'deleted' }] },
   { id: 5, status: 'active', comments: [{ content: 'PR-level' }] },
 ] };
 
@@ -72,7 +72,7 @@ test('threadsAnchoredAt: finds the thread already on that file and line', () => 
   const hits = threadsAnchoredAt(THREADS, '/Src/App/Page.tsx', 42);
   assert.strictEqual(hits.length, 1);
   assert.strictEqual(hits[0].id, 1);
-  assert.strictEqual(hits[0].firstLine, '**Crítico** — índice ausente');
+  assert.strictEqual(hits[0].firstLine, '**Critical** — missing index');
 });
 
 test('threadsAnchoredAt: path casing and leading slash do not hide a duplicate', () => {
@@ -96,10 +96,10 @@ test('threadsAnchoredAt: a null line matches only file-level threads', () => {
 
 // ── links ────────────────────────────────────────────────────────────────────
 test('projectFromAreaPath: the root segment is the project name', () => {
-  assert.strictEqual(projectFromAreaPath('Kanban EL\\Digital\\Squad 4'), 'Kanban EL');
-  assert.strictEqual(projectFromAreaPath('EVUP\\CORP'), 'EVUP');
-  assert.strictEqual(projectFromAreaPath('EVUP'), 'EVUP');
-  assert.strictEqual(projectFromAreaPath('Kanban EL/Digital'), 'Kanban EL');
+  assert.strictEqual(projectFromAreaPath('Contoso Labs\\Digital\\Squad 4'), 'Contoso Labs');
+  assert.strictEqual(projectFromAreaPath('Platform\\CORP'), 'Platform');
+  assert.strictEqual(projectFromAreaPath('Platform'), 'Platform');
+  assert.strictEqual(projectFromAreaPath('Contoso Labs/Digital'), 'Contoso Labs');
 });
 
 test('projectFromAreaPath: returns null rather than guessing a default', () => {
@@ -109,12 +109,12 @@ test('projectFromAreaPath: returns null rather than guessing a default', () => {
 
 test('azureUrl: spaces in project and repo become %20', () => {
   assert.strictEqual(
-    azureUrl({ org: 'contoso', project: 'VOE.IT - Espaco Laser', kind: 'pr', repo: 'EVUP - ELOS', id: 22838 }),
-    'https://dev.azure.com/contoso/VOE.IT%20-%20Espaco%20Laser/_git/EVUP%20-%20ELOS/pullrequest/22838'
+    azureUrl({ org: 'contoso', project: 'Contoso Labs', kind: 'pr', repo: 'Web App', id: 22838 }),
+    'https://dev.azure.com/contoso/Contoso%20Labs/_git/Web%20App/pullrequest/22838'
   );
   assert.strictEqual(
-    azureUrl({ org: 'contoso', project: 'Kanban EL', kind: 'wi', id: 67209 }),
-    'https://dev.azure.com/contoso/Kanban%20EL/_workitems/edit/67209'
+    azureUrl({ org: 'contoso', project: 'Contoso Labs', kind: 'wi', id: 67209 }),
+    'https://dev.azure.com/contoso/Contoso%20Labs/_workitems/edit/67209'
   );
 });
 
@@ -125,14 +125,14 @@ test('azureUrl: refuses to build a URL without a project', () => {
 
 test('prLinkLine: link title is the same URL lowercased', () => {
   const line = prLinkLine({
-    org: 'contoso', project: 'ELOS', repo: 'ELOS-SVC-KANBAN', prId: 22838,
-    title: 'Ajusta ordenação do chat', wiId: 67209,
+    org: 'contoso', project: 'Platform', repo: 'svc-kanban', prId: 22838,
+    title: 'Fix chat ordering', wiId: 67209,
   });
   assert.strictEqual(
     line,
-    '[Pull Request 22838](https://dev.azure.com/contoso/ELOS/_git/ELOS-SVC-KANBAN/pullrequest/22838 '
-    + '"https://dev.azure.com/contoso/elos/_git/elos-svc-kanban/pullrequest/22838"): '
-    + '[ELOS-SVC-KANBAN][PBI 67209] Ajusta ordenação do chat'
+    '[Pull Request 22838](https://dev.azure.com/contoso/Platform/_git/svc-kanban/pullrequest/22838 '
+    + '"https://dev.azure.com/contoso/platform/_git/svc-kanban/pullrequest/22838"): '
+    + '[svc-kanban][PBI 67209] Fix chat ordering'
   );
 });
 
@@ -143,9 +143,9 @@ test('prLinkLine: no work item means no empty [PBI] tag', () => {
 });
 
 test('wiLinkLine: mirrors the PR shape with the type in place of the repo', () => {
-  const line = wiLinkLine({ org: 'c', project: 'Kanban EL', wiId: 67209, title: 'Chat lento', type: 'Bug' });
-  assert.ok(line.startsWith('[Work Item 67209](https://dev.azure.com/c/Kanban%20EL/_workitems/edit/67209 '));
-  assert.ok(line.endsWith('): [Bug] Chat lento'));
+  const line = wiLinkLine({ org: 'c', project: 'Contoso Labs', wiId: 67209, title: 'Chat is slow', type: 'Bug' });
+  assert.ok(line.startsWith('[Work Item 67209](https://dev.azure.com/c/Contoso%20Labs/_workitems/edit/67209 '));
+  assert.ok(line.endsWith('): [Bug] Chat is slow'));
 });
 
 // ── classifyFieldValue ───────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ test('findLostFacts: a dropped number is caught — the failure that happened 3x
 });
 
 test('findLostFacts: a dropped !id / #id reference is caught', () => {
-  const lost = findLostFacts('Corrigido em !22838, ver #65631.', 'Corrigido no PR citado.');
+  const lost = findLostFacts('Fixed in !22838, see #65631.', 'Fixed in the PR cited.');
   assert.deepStrictEqual(lost.references, ['!22838', '#65631']);
 });
 
@@ -215,28 +215,28 @@ test('findLostFacts: a dropped link is caught', () => {
 });
 
 test('findLostFacts: losing one of several identical numbers still counts', () => {
-  const lost = findLostFacts('tentou 3 vezes, esperou 3s, falhou 3x', 'tentou 3 vezes, falhou 3x');
+  const lost = findLostFacts('tried 3 times, waited 3s, failed 3x', 'tried 3 times, failed 3x');
   assert.deepStrictEqual(lost.numbers, ['3']);
 });
 
 test('findLostFacts: a pure markup change loses nothing', () => {
-  const lost = findLostFacts('<p>Erro <b>500</b> em !22838</p>', 'Erro 500 em !22838');
+  const lost = findLostFacts('<p>Error <b>500</b> in !22838</p>', 'Error 500 in !22838');
   assert.deepStrictEqual(lost, {});
 });
 
 test('findLostFacts: added facts are not a loss', () => {
-  assert.deepStrictEqual(findLostFacts('Erro 500', 'Erro 500 em !22838, 3 vezes'), {});
+  assert.deepStrictEqual(findLostFacts('Error 500', 'Error 500 in !22838, 3 times'), {});
 });
 
 test('findForbiddenMarkup: catches what the work-item form will not render', () => {
   const names = (t) => findForbiddenMarkup(t).map((f) => f.name);
   assert.ok(names('<p style="color:red">x</p>').includes('inline style attribute'));
   assert.ok(names('<table><tr><td>a</td></tr></table>').includes('table'));
-  assert.ok(names('## Causa raiz').includes('raw markdown heading'));
-  assert.ok(names('isto e **importante**').includes('raw markdown bold'));
-  assert.ok(names('- primeiro item').includes('raw markdown bullet'));
+  assert.ok(names('## Root cause').includes('raw markdown heading'));
+  assert.ok(names('this is **important**').includes('raw markdown bold'));
+  assert.ok(names('- first item').includes('raw markdown bullet'));
   assert.ok(names('```sql\nSELECT 1\n```').includes('markdown code fence'));
-  assert.ok(names('corrigido ✅').includes('emoji'));
+  assert.ok(names('fixed ✅').includes('emoji'));
 });
 
 test('findForbiddenMarkup: clean HTML passes', () => {
@@ -268,8 +268,8 @@ test('verifyFieldWrite: a truncated baseline skips fact-loss instead of inventin
 
 test('verifyFieldWrite: clean rewrite is ok', () => {
   const v = verifyFieldWrite({
-    before: '<p>Erro 500 em !22838</p>',
-    after: '<p>Erro <strong>500</strong> observado em !22838.</p>',
+    before: '<p>Error 500 in !22838</p>',
+    after: '<p>Error <strong>500</strong> seen in !22838.</p>',
   });
   assert.strictEqual(v.ok, true);
 });
