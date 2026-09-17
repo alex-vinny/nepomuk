@@ -5,7 +5,7 @@
   "org": "your-org",
   "project": "Your Project",
   "patName": "my token",
-  "patValidTo": "2027-04-16",
+  "patValidTo": "2030-01-31",
   "patWarnDays": 30,
 
   "defaultProfile": "your-org",

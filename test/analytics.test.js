@@ -374,7 +374,7 @@ test('normalizeRelations decodes PR, commit and branch artifact links', () => {
   const item = { relations: [
     { rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/aaaa-1111%2Fbbbb-2222%2F21308', attributes: { name: 'Pull Request' } },
     { rel: 'ArtifactLink', url: 'vstfs:///Git/Commit/aaaa-1111%2Fbbbb-2222%2Fdeadbeef', attributes: { name: 'Fixed in Commit' } },
-    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/aaaa-1111%2Fbbbb-2222%2FGBfeatures%2F65373_midia', attributes: { name: 'Branch' } },
+    { rel: 'ArtifactLink', url: 'vstfs:///Git/Ref/aaaa-1111%2Fbbbb-2222%2FGBfeatures%2F1234-new-widget', attributes: { name: 'Branch' } },
   ] };
   const [pr21308, commit, branch] = normalizeRelations(item);
   assert.deepStrictEqual(
@@ -385,7 +385,7 @@ test('normalizeRelations decodes PR, commit and branch artifact links', () => {
   assert.strictEqual(commit.target, 'deadbeef');
   // the GB prefix is Azure's, not part of the branch name — and the name keeps its slashes
   assert.strictEqual(branch.kind, 'branch');
-  assert.strictEqual(branch.target, 'features/123_feature');
+  assert.strictEqual(branch.target, 'features/1234-new-widget');
 });
 
 test('normalizeRelations maps hierarchy/related links to work-item ids and keeps the rest', () => {
