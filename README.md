@@ -21,7 +21,7 @@ and do not let an edit on one side propagate to the other unless explicitly inte
 
 | Surface | Renders as | Write | Edit with |
 |---|---|---|---|
-| **WI custom fields** (`Custom.CausaRaiz`, `Custom.RequisitosFuncionaisImplementados`, `Microsoft.VSTS.TCM.ReproSteps`, …) | **HTML** | HTML | `wi set-field` |
+| **WI long-form fields** (`System.Description`, `Microsoft.VSTS.TCM.ReproSteps`, any long-form `Custom.*`, …) | **HTML**, and a restricted subset: `style=` is stripped and `<table>` renders inconsistently | HTML — or Markdown with `--from-markdown`, which converts using the `field` profile | `wi set-field` |
 | **WI comments** | HTML (rendered by Azure) | **Markdown only** — this CLI runs the `--body-file` through a Markdown→HTML converter | `wi comment` / `wi edit-comment` |
 | **PR description** | **Markdown** | Markdown | `pr create` / `pr set-desc` |
 | **PR comments** | **Markdown** | Markdown | `pr comment` / `pr edit-comment` |
@@ -43,34 +43,28 @@ and do not let an edit on one side propagate to the other unless explicitly inte
     recognised, so prose containing a stray `|` is never mistaken for a table. A `|` inside inline
     code is content, not a separator; elsewhere in a cell, escape it as `\|`.
 - HTML written into a **Markdown** PR body can render as raw tags. Write Markdown there.
-- Keep a separate body file per surface (e.g. `causa-raiz.html` for a WI field vs `pr-body.md` for a PR).
+- Keep a separate body file per surface (e.g. `root-cause.html` for a WI field vs `pr-body.md` for a PR).
 - Verify a field's engine before writing: `GET /_apis/wit/fields/<ref>` → `type` (`html` / `plainText` / …),
   or `wi layout` / inspect an existing value with `wi field`.
 
-> **Escalation policy (comment formatting/styling).** WI-comment formatting is produced by the
-> hand-rolled `markdownToHtml` in `lib/workitem.js` (Markdown → HTML; used **only** by
-> `wi comment`/`wi edit-comment` — the PR path sends raw Markdown and must stay untouched).
-> On the **next** formatting/styling failure, do **not** add more regex to that converter —
-> swap in a maintained library instead:
+> **Known debt: the Markdown converter.** Work-item formatting is produced by the hand-rolled
+> `markdownToHtml` in `lib/workitem.js` (Markdown → HTML; used **only** by the work-item paths —
+> the PR path sends raw Markdown and must stay untouched). It has grown by regex past the point
+> where that is a good idea. **Do not add more regex to it** — the intended next change to that
+> file is to swap it for a maintained library:
+>
 > - **Write path (author MD → send HTML):** replace `markdownToHtml` with **`marked`** or
->   **`markdown-it`** behind the same function signature (drop-in). This is the fix for garbled
->   **outgoing** comments (bold/code/lists/tables/links).
+>   **`markdown-it`** behind the same function signature. This is the fix for garbled **outgoing**
+>   content (bold/code/lists/tables/links).
 > - **Read/display path (fetched HTML → terminal MD):** use **`turndown`**
 >   (<https://github.com/mixmark-io/turndown>) to render `wi comments`/`pr comments` output —
 >   turndown is HTML→Markdown, so it does **not** help the write path.
-> Trade-off to accept: either library adds the tool's **first runtime dependency** (today it is
-> zero-dep, Node built-ins only — see Requirements). That's the deliberate cost of retiring the
-> regex converter; take it rather than patching regex again.
 >
-> **Exception taken on 2026-08-19 (tables).** A WI comment with a pipe table rendered as literal
-> `| a | b |` text. The converter was **extended with regex** rather than swapped, by explicit
-> decision, because a drop-in library does not actually solve this case on its own: Azure renders
-> comment HTML **without our CSS**, so `markdown-it`/`marked` would emit a bare `<table>` that
-> comes out borderless — the inline `style=` attributes this converter writes are the part that
-> makes the table readable, and keeping them would require a custom renderer override anyway.
-> Added: pipe tables (with alignment and inline styling), `1.` lists, `>` quotes; covered by tests
-> in `test/connector.test.js`. **The policy above still stands for the next failure** — this
-> exception was about tables specifically, not a general licence to keep growing the regex.
+> Two costs to accept going in. Either library adds the tool's **first runtime dependency** (today
+> it is zero-dep, Node built-ins only — see Requirements). And neither is a pure drop-in: Azure
+> renders this HTML without any stylesheet of ours, so a bare `<table>` comes out borderless, and
+> the inline `style=` attributes are the part that makes it readable. Both output profiles
+> therefore need **custom renderer overrides**, not just default output.
 
 ---
 
@@ -110,7 +104,7 @@ required. Set it any one of these ways:
 
 ```bash
 # Persist a PAT + org in ~/.azure-connector.json
-node index.js config --pat <your-token> --org <your-org> --pat-valid-to 2027-04-16
+node index.js config --pat <your-token> --org <your-org> --pat-valid-to <YYYY-MM-DD>
 
 # Set a default project so bare work item ids work
 node index.js config --project "MyBoard"
@@ -134,7 +128,7 @@ A PAT is scoped to a single Azure DevOps org, so multi-org support is one profil
 {
   "defaultProfile": "contoso",
   "profiles": {
-    "contoso": { "org": "contoso", "project": "Platform", "pat": "...", "patValidTo": "2027-04-16" },
+    "contoso": { "org": "contoso", "project": "Platform", "pat": "...", "patValidTo": "2030-01-31" },
     "other":   { "org": "other-org", "patEnv": "AZURE_PAT_OTHER" }
   }
 }
@@ -144,13 +138,13 @@ A PAT is scoped to a single Azure DevOps org, so multi-org support is one profil
   URL and the right PAT is used, no flag.
 - Other commands pick the profile from `--profile <name>`, `AZURE_PROFILE`, or `defaultProfile`.
 - `pat` stores the token inline; **`patEnv` names an env var instead**, so no secret sits on disk —
-  inject it at runtime (e.g. `vault run azure-pat=AZURE_PAT_OTHER -- node index.js ...`).
+  inject it at runtime from whatever secret store you use (`AZURE_PAT_OTHER=$(...) node index.js …`).
 - A single top-level `{ pat, org, … }` with no `profiles` behaves exactly as one profile.
 
 ### Transient-failure retries
 
 Every HTTP call retries transient failures with exponential backoff (~0.5s → 1s → 2s → 4s,
-capped at 8s, plus jitter), so bursts of writes no longer fail on the first hiccup:
+capped at 8s, plus jitter), so a burst of writes survives a single hiccup:
 
 - **Retried:** `429` (Azure throttling — the usual cause of "had to try several times"), `500/502/503/504`
   (transient server errors, common on preview endpoints like the WI-comments API `7.1-preview.3`),
@@ -172,7 +166,7 @@ A PAT without token-management scope can't read its own expiry from the API, so 
 When you rotate the PAT, record the new expiry so the warnings stay accurate:
 
 ```bash
-node index.js config --pat <new-token> --pat-valid-to 2028-01-31 --pat-name "PR analizer v2"
+node index.js config --pat <new-token> --pat-valid-to <YYYY-MM-DD> --pat-name "<label>"
 ```
 
 Expiry overrides via env: `AZURE_PAT_VALID_TO`, `AZURE_PAT_NAME`, `AZURE_PAT_WARN_DAYS`.
@@ -273,7 +267,7 @@ finding, so the line is always printed rather than silently omitted).
 # Branches via flags, body from a file, link a work item
 node index.js pr create "<repo-url>" \
   --source users/me/my-branch --target releases/rc/202606_1 \
-  --title "[BUG 65019] Fix ..." --desc-file ./pr-body.md --work-items 65019
+  --title "[BUG 1234] Fix ..." --desc-file ./pr-body.md --work-items 1234
 
 # Branches taken from a pullrequestcreate URL (sourceRef/targetRef in the query)
 node index.js pr create "<pullrequestcreate-url>" --title "..." --desc "short text"
@@ -290,9 +284,8 @@ take a bare branch or a full `refs/heads/...` ref; if omitted, they are read fro
 
 > ⚠️ **`--target` is required (no default to the repo's default branch).** When creating a
 > "PR → main/master" you must know the target branch first. The CLI does **not** fall back to
-> the repo's `defaultBranch`, and beware: the default branch is not always `main` (e.g.
-> `svc-customer` had its default pointing at a feature branch). Resolve it via the repo
-> API before creating — see **Repo-level reads not exposed as commands** below.
+> the repo's `defaultBranch`, and beware: the default branch is not always `main` — a repo can
+> have it pointing at a long-lived feature branch. Resolve it with `repo get` before creating.
 
 > ⚠️ Azure DevOps limits the PR **description to 4000 characters**. The CLI validates this
 > before calling the API and fails with a clear message (instead of an opaque HTTP 400). If
@@ -354,7 +347,7 @@ node index.js pr comment <pr-url> --body-file ./inline-comment.md --file /src/Se
 >
 > **Self-correcting inline anchor.** For inline comments, the tool validates the anchor against the PR's **latest iteration** before posting: it auto-corrects the file path's casing/leading slash, picks the correct side (**right** for added/edited lines, **left** for deleted lines), and **refuses a line that doesn't exist** with a clear message (re-run your diff with `--force` and try again). Use `--dry-run` to preview where a comment would land without posting. Pass `--no-validate` to skip validation and post blindly (legacy behavior).
 >
-> Line numbers are the **new (right-hand) file** line numbers — pair this with `git-diff-analysis --output lines`, which emits exactly those.
+> Line numbers are the **new (right-hand) file** line numbers — the same ones `pr diff` prints.
 
 ---
 
@@ -377,7 +370,7 @@ Thread IDs come from `pr comments`. `--comment <n>` targets a comment other than
 node index.js pr set-desc <pr-url> --body-file ./pr-body.md
 
 # Inline text, and/or rename the PR
-node index.js pr set-desc <pr-url> "New description" --title "[BUG 65019] New title"
+node index.js pr set-desc <pr-url> "New description" --title "[BUG 1234] New title"
 ```
 
 PATCHes the live PR. Use it to **sync a PR description after later commits change the
@@ -394,7 +387,7 @@ node index.js pr abandon <pr-url>
 ```
 
 Sets the PR status to `abandoned` (soft close). Branches are left in place — delete them separately
-if needed. Used by the review-simulation harness to tear down throwaway PRs.
+if needed. Handy for tearing down throwaway PRs created while testing a review flow.
 
 ---
 
@@ -410,12 +403,11 @@ node index.js pr diff <pr-url|pr-id> --full
 
 By default the command prints the file list and then, for each changed file, fetches both
 the old (target branch) and new (source branch) versions and emits a compact **unified
-diff** — what a code review needs. `--full` (alias `--content`) restores the older
-behaviour of dumping each changed file's whole contents from the source branch; use it when
-you need the surrounding code, not just the change.
+diff** — what a code review needs. `--full` (alias `--content`) instead dumps each changed
+file's whole contents from the source branch; use it when you need the surrounding code, not
+just the change.
 
-> The default flipped in 1.2.0 — it used to print whole files, with `--patch` for the diff.
-> `--patch` is still accepted and is now a no-op, so existing scripts keep working.
+> `--patch` is accepted as a no-op, since the unified diff is already the default.
 
 ---
 
@@ -545,17 +537,17 @@ node index.js wi search --project "Platform" --wiql "SELECT [System.Id] FROM Wor
 
 #### Discover & edit custom fields (`layout`, `fields`, `field`, `set-field`)
 
-Custom processes (e.g. `MyProcess` on `MyBoard`) relabel and add fields — the UI
-section "Causa Raiz" is backed by `Custom.CausaRaiz`, "Passo a Passo para Reprodução do
-Teste" is `Microsoft.VSTS.TCM.ReproSteps`, etc. **Empty fields are not returned by the
-API**, so you cannot discover an empty custom field from `wi get`/`wi fields` — use
-`wi layout`, which reads the work item form definition.
+A custom process relabels and adds fields, so the label on the form is not the name the API
+wants — a section shown as "Root Cause" may be backed by `Custom.RootCause`, and one shown
+under a localized label may be a built-in like `Microsoft.VSTS.TCM.ReproSteps`. **Empty fields
+are not returned by the API**, so you cannot discover an empty custom field from
+`wi get`/`wi fields` — use `wi layout`, which reads the work item form definition.
 
 > Rule of thumb: before editing or commenting on a work item, run `wi layout` to learn the
 > real field reference names instead of guessing.
 
 > **Fallback when the field doesn't exist (work items only):** work item *types* differ — a
-> "Bug" may carry `Custom.CausaRaiz` / `Custom.RequisitosFuncionaisImplementados` while a
+> "Bug" may carry `Custom.RootCause` / `Custom.ImplementedSolution` while a
 > "Bug Task" (or Task/PBI) does **not**. If `wi layout` shows the requested custom field is
 > **not on that WIT**, do **not** try to `set-field` it (it will fail) and do **not** silently
 > retarget another item — post the content as a **`wi comment`** instead, and tell the user the
@@ -572,26 +564,39 @@ node index.js wi fields <wi-url> [--all] [--filter <substr>]
 # Print one field's raw value (use for an edit round-trip)
 node index.js wi field <wi-url> <fieldRef>
 
-# Set ANY field by reference name (HTML/markdown/plain). Prefer --body-file for HTML.
+# Set ANY field by reference name (HTML/plain). Prefer --body-file for HTML.
 node index.js wi set-field <wi-url> <fieldRef> ["<value>"]
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path>
+node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --from-markdown
 node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a field
 ```
+
+> **`--from-markdown` — author in Markdown, store field HTML.** Converts the body with the
+> **`field` profile**: no `style=` attribute anywhere and every pipe table rendered as a `<ul>`,
+> because the work-item form strips inline styles and renders tables inconsistently. This is a
+> *different* profile from the one `wi comment` uses (which keeps a styled `<table>` — the
+> discussion pane renders that fine). Same source, two surfaces, two outputs.
+>
+> **A multi-line field write that still carries raw Markdown is refused**, before the request is
+> sent and before a `--dry-run` preview claims success. The check runs in `lib/workitem.js`
+> (`assertRenderableFieldValue`), not in the CLI, so a one-off script calling `setField` /
+> `createWorkItem` directly is covered too — that is exactly how WI 67322 got 20 KB of raw
+> markdown into `System.Description`, asterisks and pipe rows visible on the board. Override with
+> `--force` (CLI) or `{ force: true }` (lib) once you have decided the body is right as-is.
 
 Examples:
 ```bash
 node index.js wi layout https://dev.azure.com/contoso/MyBoard/_workitems/edit/65130
-#   "Causa Raiz"  ->  Custom.CausaRaiz
-#   "Passo a Passo para Reprodução do Teste"  ->  Microsoft.VSTS.TCM.ReproSteps
+#   "Root Cause"  ->  Custom.RootCause
+#   "Test Reproduction Steps"  ->  Microsoft.VSTS.TCM.ReproSteps
 node index.js wi set-field https://dev.azure.com/contoso/MyBoard/_workitems/edit/65130 \
-  Custom.CausaRaiz --body-file causa-raiz.html
+  Custom.RootCause --body-file root-cause.html
 ```
 
-> `Custom.CausaRaiz`, `Custom.RequisitosFuncionaisImplementados` ("Solução Implementada") and
-> `Microsoft.VSTS.TCM.ReproSteps` are all **HTML** fields (verified via
-> `GET /_apis/wit/fields/<ref>` → `type: html` on the MyProcess process). Write HTML for these —
-> Markdown written into an HTML field is stored literally and its special chars get escaped
-> (e.g. `"` → `&quot;`), so it renders as raw text.
+> Long-form fields like `Microsoft.VSTS.TCM.ReproSteps` and rich-text `Custom.*` controls are
+> **HTML** fields — confirm with `GET /_apis/wit/fields/<ref>` → `type: html`. Write HTML for
+> these: Markdown written into an HTML field is stored literally and its special chars get
+> escaped (e.g. `"` → `&quot;`), so it renders as raw text.
 > Check the field type (`wi layout` shows the control, or inspect an existing value with
 > `wi field`) before writing, so your formatting renders instead of showing as literal text.
 
@@ -615,7 +620,7 @@ Lists all comments with author and date. Use `--ids` to get the real comment IDs
 ```bash
 node index.js wi comment <wi-url> --body-file ./update.html
 node index.js wi comment <wi-url> --body-file ./update.md
-node index.js wi comment <wi-url> --body-file ./causa-raiz.html --field Custom.CausaRaiz  # route into a field instead
+node index.js wi comment <wi-url> --body-file ./root-cause.html --field Custom.RootCause  # route into a field instead
 node index.js wi comment <wi-url> --body-file ./update.html --as-comment                 # post even though fields exist
 ```
 
@@ -626,17 +631,17 @@ Work item comments require `--body-file`. Inline text arguments are not supporte
 Analysis (root cause, solution, requirements) belongs in a work item's **dedicated
 custom fields**, not in a loose comment. So `wi comment` runs a pre-flight check: if the
 target WI has long-form custom fields (rich-text / multiline `Custom.*` controls such as
-`Causa Raiz` → `Custom.CausaRaiz` or `Solução Implementada` →
-`Custom.RequisitosFuncionaisImplementados`), it **lists them and stops without posting**:
+`Root Cause` → `Custom.RootCause` or `Implemented Solution` →
+`Custom.ImplementedSolution`), it **lists them and stops without posting**:
 
 ```
-Work item #65488 (Bug) has content fields that may be the right home for this text:
+Work item #1234 (Bug) has content fields that may be the right home for this text:
 
-  "Causa Raiz"            ->  Custom.CausaRaiz                          [empty]
-  "Solução Implementada"  ->  Custom.RequisitosFuncionaisImplementados  [empty]
+  "Root Cause"            ->  Custom.RootCause            [empty]
+  "Implemented Solution"  ->  Custom.ImplementedSolution  [empty]
 
 Root-cause / solution / analysis usually belongs in a field, not a comment. Choose one:
-  --field <ref>    put this body into that field (e.g. --field Custom.CausaRaiz)
+  --field <ref>    put this body into that field (e.g. --field Custom.RootCause)
   --as-comment     post it as a plain comment anyway
 ```
 
@@ -648,7 +653,7 @@ Then decide explicitly:
 
 Work items with no long-form custom fields (most Tasks/PBIs) post with no friction. The check is
 **generic** — it reads the WIT's form layout via the process API, so it works on any work item type
-in any project, not just Platform Bugs. If the layout can't be fetched, the check is skipped rather than
+in any project and any process. If the layout can't be fetched, the check is skipped rather than
 blocking a legitimate comment. This makes the routing decision **tool-enforced and agent-agnostic**:
 every caller is confronted with the field options, instead of relying on remembering them.
 
@@ -700,7 +705,7 @@ node index.js wi delete-comment <wi-url> <commentId>
 
 Removes a comment (Azure soft-deletes it — it disappears from the thread view). Get
 `<commentId>` from `wi comments --ids`. Useful when content was moved into a structured
-custom field (e.g. `Causa Raiz` / `Solução Implementada` via `wi set-field`) and the loose
+custom field (e.g. `Root Cause` / `Implemented Solution` via `wi set-field`) and the loose
 comment is now redundant. Prefer custom fields over comments when the work item type exposes
 them — run `wi layout` first to discover the field reference names.
 
@@ -709,12 +714,13 @@ them — run `wi layout` first to discover the field reference names.
 #### Change a work item's state
 
 ```bash
-node index.js wi set-state <wi-url> "Aguardando CodeReview"
+node index.js wi set-state <wi-url> "Code Review"
 ```
 
-Sets `System.State`. The value must match a valid state for the work item type
-(e.g. for *Bug Task*: `To Do`, `In Progress`, `Aguardando CodeReview`, `Aguardando Terceiros`,
-`Em HML`, `Done`, `Removed`) or the API rejects it.
+Sets `System.State`. The value must be one of the states that work item type actually defines
+(a custom process can name them anything — `To Do`, `In Progress`, `Code Review`, `Done`, …)
+or the API rejects it. A rejected transition is preflighted and reports the blocking field
+and its allowed values rather than a bare rule error.
 
 ---
 
@@ -744,13 +750,13 @@ Iteration Path, and Assignee** unless `--assignee` overrides it.
 - `--estimate <hours>` sets both `OriginalEstimate` and `RemainingWork` (hours).
 - `--desc "<text>"` sets `System.Description`.
 - `--activity <name>` sets `Microsoft.VSTS.Common.Activity`. **Defaults to `Development`**
-  because some projects (e.g. `MyBoard`) have a rule that makes Activity required —
+  because some processes have a rule that makes Activity required —
   creating a Task without it fails with `TF401320: Rule Error for field Activity`.
 
 Example — break a PBI into child tasks:
 ```bash
 node index.js wi create-task https://dev.azure.com/contoso/MyBoard/_workitems/edit/64898 \
-  "[A] CrmJobService: TimerTrigger" --estimate 4 --desc "Criar a TimerTrigger function..."
+  "[A] CrmJobService: TimerTrigger" --estimate 4 --desc "Create the TimerTrigger function..."
 ```
 
 ---
@@ -816,7 +822,7 @@ node index.js wi updates <wi-url|id> --all-fields
 node index.js wi updates <wi-url|id> --time-in-state
 
 # When did it first/last reach a given state?
-node index.js wi updates <wi-url|id> --entered "Pronto para Teste"
+node index.js wi updates <wi-url|id> --entered "Ready for Test"
 
 # Bulk: one TSV row per transition, across many items
 node index.js wi updates --ids 61683,62845,63049 --project <p>
@@ -840,7 +846,7 @@ Bulk output is a TSV (`id · at · from · to · by`) designed to be piped strai
 
 ```bash
 node index.js wi updates --ids @ids.txt --project <p> \
-  | awk -F'\t' '$3=="Pronto para Teste" && $4=="Em Teste"' | wc -l
+  | awk -F'\t' '$3=="Ready for Test" && $4=="In Test"' | wc -l
 ```
 
 Two things the raw feed will trip you on, both handled here: a revision that rewrites a field with
@@ -857,20 +863,20 @@ rather than making every open item look 8000 years old.
 Lists a work item's relations with the `vstfs:///` artifact URLs **decoded**: linked PRs,
 commits and branches come back as usable ids (`pr 21308  repo=<repoId>`), not opaque URIs.
 This is the first step of any ticket→code measurement — from here, `pr get` / `pr diff`
-take over. Before this command existed, the step needed `raw` plus a script.
+take over.
 
 ```bash
 # One item, human-readable
-node index.js wi relations 65631 --project EVUP
+node index.js wi relations 64891 --project Platform
 
 # Only the PR links
-node index.js wi relations 65631 --project EVUP --type pr
+node index.js wi relations 64891 --project Platform --type pr
 
 # Bulk: one TSV row per relation (id, kind, target, repoId, name).
 # Uses workitemsbatch ($expand=relations, errorPolicy omit): 200 ids per API call.
-node index.js wi search --project EVUP --json --wiql "SELECT [System.Id] FROM WorkItems WHERE …" \
+node index.js wi search --project Platform --json --wiql "SELECT [System.Id] FROM WorkItems WHERE …" \
   | jq -r '.[].id' > ids.txt
-node index.js wi relations --ids @ids.txt --project EVUP --type pr > links.tsv
+node index.js wi relations --ids @ids.txt --project Platform --type pr > links.tsv
 ```
 
 Kinds: `pr`, `commit`, `branch`, `build`, `parent`, `child`, `related`, `duplicate`,
@@ -932,18 +938,18 @@ re-queues with none. Requires `--project` (or a configured default / `AZURE_PROJ
 
 ```bash
 # Recent builds on a branch (newest first)
-node index.js build list --project Platform --branch features/65373_midia --top 10
+node index.js build list --project Platform --branch features/1234-new-widget --top 10
 
 # Filter by pipeline (name or numeric id) and/or repo; --json for raw objects
-node index.js build list --project Platform --definition ui-customer --repo ui-customer --json
+node index.js build list --project Platform --definition web-ui --repo web-ui --json
 
 # Most-recent build matching the filters — full detail incl. its variables
-node index.js build last --project Platform --branch features/65373_midia --definition ui-customer
+node index.js build last --project Platform --branch features/1234-new-widget --definition web-ui
 
 # Re-run the latest build on a branch with the SAME config/variables.
 # Previews by default (dry run); add --yes to actually queue.
-node index.js build rerun --project Platform --branch features/65373_midia --definition ui-customer
-node index.js build rerun --project Platform --branch features/65373_midia --definition ui-customer --yes
+node index.js build rerun --project Platform --branch features/1234-new-widget --definition web-ui
+node index.js build rerun --project Platform --branch features/1234-new-widget --definition web-ui --yes
 
 # Re-run one specific build id
 node index.js build rerun 40587 --project Platform --yes
@@ -954,7 +960,7 @@ node index.js build rerun 40587 --project Platform --branch releases/rc/202606_1
 
 Notes:
 - **`rerun` is a write** (it triggers CI). It previews the payload and does nothing unless you pass
-  `--yes` — same convention as `dbq` mutations.
+  `--yes`.
 - Without a `<buildId>`, `rerun` resolves the latest build matching `--branch`/`--definition`/`--repo`,
   fetches its full config, and re-queues it — so the new run picks up the branch's current HEAD.
 - `--branch` accepts a short name (`features/x`) or a full ref (`refs/heads/features/x`).
@@ -993,7 +999,7 @@ node index.js repo refs Web --project Fabrikam --filter heads/release/2026-06
 # 0 ref(s) …  → the branch does not exist
 ```
 
-Gotchas learned in the field:
+Gotchas:
 - **`repo list` without `--project` sweeps the org only when no default project is set.** It falls
   back to the configured `project` (or `AZURE_PROJECT`), so on a configured machine it silently lists
   one project and a repo that lives elsewhere looks like it does not exist. Enumerate projects with
@@ -1044,11 +1050,10 @@ node index.js wi search --project "<project>" --json --fields System.WorkItemTyp
 # then group by month × type
 ```
 
-A field trap that costs an afternoon: the closed date lives in
-`Microsoft.VSTS.Common.ClosedDate` — `System.ClosedDate` does **not** exist in this org's
-process, and a WIQL naming it fails. Don't "simplify" the example above, and don't substitute
-`System.ChangedDate`, which moves on any edit. Custom fields go by their reference name, which
-`wi layout` discovers.
+A field trap worth knowing: the closed date lives in `Microsoft.VSTS.Common.ClosedDate`.
+`System.ClosedDate` does **not** exist in the stock processes, and a WIQL naming it fails — so
+don't "simplify" the example above, and don't substitute `System.ChangedDate`, which moves on
+any edit. Custom fields go by their reference name, which `wi layout` discovers.
 
 Watch for a **taxonomy change** mid-window: if the team started filing "Support Request" where it
 used to file "Bug", a bug count that falls is not quality improving. Group by type before concluding
@@ -1149,8 +1154,9 @@ azure-connector/
 ├── package.json
 ├── README.md
 ├── test/
-│   ├── connector.test.js  # unit tests (node:test)
-│   └── analytics.test.js  # unit tests for the measurement helpers
+│   ├── connector.test.js   # unit tests (node:test)
+│   ├── analytics.test.js   # unit tests for the measurement helpers
+│   └── guardrails.test.js  # unit tests for the pre-write guards
 └── lib/
     ├── config.js     # PAT/org config, URL parser
     ├── api.js        # HTTP transport (no external deps)
@@ -1159,6 +1165,8 @@ azure-connector/
     ├── iteration.js  # Iterations (sprints) and their date windows
     ├── repo.js       # Repository metadata and refs
     ├── build.js      # Pipeline build list/last/rerun (generic variable replay)
+    ├── links.js      # Canonical Azure DevOps URLs and reference lines
+    ├── verify.js     # Fact-loss and unrenderable-markup checks
     └── format.js     # Pretty-print helpers
 ```
 
@@ -1180,3 +1188,8 @@ that is what keeps the suite deterministic and what lets an old measurement be r
 the same numbers. The cases worth knowing about are the ones asserting what must *not* count: a
 same-value rewrite is not a state transition, a year-9999 date is no date, a human comment reading
 "Bob voted 10" is not a vote, and a cleared vote (`0`) is not a review.
+
+`guardrails.test.js` covers the checks that run before a write: inline-anchor duplicate
+detection, head-movement detection, project resolution from an Area path, the canonical link
+lines, and the field-write verifier (fact loss as a multiset, unrenderable markup, and the
+8192-byte truncation signature that makes a fact-loss comparison meaningless).

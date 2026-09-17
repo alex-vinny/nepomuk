@@ -10,7 +10,7 @@ const { parseArgs, normalizeAzureRepoPath } = require('../index.js');
 const { parseUrl } = require('../lib/config');
 const { buildThreadBody } = require('../lib/pr');
 const { normalizeBranchRef, buildRerunPayload, summarizeBuild } = require('../lib/build');
-const { markdownToHtml } = require('../lib/workitem');
+const { markdownToHtml, markdownToFieldHtml, assertRenderableFieldValue } = require('../lib/workitem');
 
 // ── parseArgs ────────────────────────────────────────────────────────────────
 test('parseArgs: separates positionals, valued flags, and boolean flags', () => {
@@ -113,7 +113,7 @@ test('buildThreadBody: file-level comment (no line) keeps filePath, no anchors',
 
 // ── build: normalizeBranchRef ────────────────────────────────────────────────
 test('normalizeBranchRef: short branch becomes a heads ref', () => {
-  assert.strictEqual(normalizeBranchRef('features/65373_midia'), 'refs/heads/features/65373_midia');
+  assert.strictEqual(normalizeBranchRef('features/1234-new-widget'), 'refs/heads/features/1234-new-widget');
   assert.strictEqual(normalizeBranchRef('main'), 'refs/heads/main');
 });
 
@@ -132,18 +132,18 @@ test('normalizeBranchRef: no branch (undefined/true) yields undefined', () => {
 test('buildRerunPayload: replays definition, branch, parameters, templateParameters', () => {
   const src = {
     id: 40587,
-    definition: { id: 369, name: 'APP-UI-CUSTOMER' },
-    sourceBranch: 'refs/heads/features/65373_midia',
-    parameters: '{"clientName":"botoclinic","platformName":"android"}',
-    templateParameters: { groupName: 'boto-app' },
+    definition: { id: 369, name: 'APP-UI-WEB' },
+    sourceBranch: 'refs/heads/features/1234-new-widget',
+    parameters: '{"clientName":"acme-retail","platformName":"android"}',
+    templateParameters: { groupName: 'acme-app' },
   };
   const p = buildRerunPayload(src);
   assert.deepStrictEqual(p, {
     definition: { id: 369 },
-    sourceBranch: 'refs/heads/features/65373_midia',
+    sourceBranch: 'refs/heads/features/1234-new-widget',
     reason: 'manual',
-    parameters: '{"clientName":"botoclinic","platformName":"android"}',
-    templateParameters: { groupName: 'boto-app' },
+    parameters: '{"clientName":"acme-retail","platformName":"android"}',
+    templateParameters: { groupName: 'acme-app' },
   });
 });
 
@@ -179,17 +179,17 @@ test('buildRerunPayload: throws when the source build has no definition id', () 
 test('summarizeBuild: flattens key fields, parses parameters, builds web url', () => {
   const s = summarizeBuild({
     id: 40658,
-    buildNumber: '20260713.1 APP-UI-CUSTOMER',
-    definition: { id: 369, name: 'APP-UI-CUSTOMER' },
+    buildNumber: '20260713.1 APP-UI-WEB',
+    definition: { id: 369, name: 'APP-UI-WEB' },
     status: 'notStarted',
-    sourceBranch: 'refs/heads/features/65373_midia',
+    sourceBranch: 'refs/heads/features/1234-new-widget',
     sourceVersion: 'eb51ec9e5e54b0f3d516ac88b71db0035b206ee2',
-    parameters: '{"clientName":"botoclinic"}',
+    parameters: '{"clientName":"acme-retail"}',
   }, 'https://dev.azure.com/contoso/Fabrikam');
   assert.strictEqual(s.id, 40658);
-  assert.strictEqual(s.definition, 'APP-UI-CUSTOMER');
+  assert.strictEqual(s.definition, 'APP-UI-WEB');
   assert.strictEqual(s.sourceVersion, 'eb51ec9e'); // truncated to 8
-  assert.deepStrictEqual(s.parameters, { clientName: 'botoclinic' });
+  assert.deepStrictEqual(s.parameters, { clientName: 'acme-retail' });
   assert.strictEqual(s.url, 'https://dev.azure.com/contoso/Fabrikam/_build/results?buildId=40658');
 });
 
@@ -334,7 +334,7 @@ test('markdownToHtml: header-only table is not torn apart by the paragraph pass'
 });
 
 test('markdownToHtml: a pipe inside inline code is not a cell separator', () => {
-  const html = markdownToHtml('Texto com `a|b` no meio.');
+  const html = markdownToHtml('Text with `a|b` in the middle.');
   assert.ok(html.includes('<code>a|b</code>'), 'pipe restored inside the code span');
   assert.ok(!html.includes('[[[PIPE]]]'), 'no leftover placeholder marker');
   assert.ok(!html.includes('<table'), 'prose with a pipe is not read as a table');
@@ -365,6 +365,68 @@ test('markdownToHtml: block quote becomes <blockquote> without stray breaks', ()
 test('markdownToHtml: full HTML input is still passed through untouched', () => {
   const src = '<h2>T</h2>\n<table><tbody><tr><td>a</td></tr></tbody></table>';
   assert.strictEqual(markdownToHtml(src), src);
+});
+
+// ── markdownToFieldHtml: the 'field' profile ─────────────────────────────────
+// Long-form form fields sanitize differently from comments: `style=` is dropped and
+// tables render inconsistently. So the field profile must emit neither.
+test('markdownToFieldHtml: emits no inline style attribute anywhere', () => {
+  const html = markdownToFieldHtml('## T\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- x');
+  assert.ok(!/style\s*=/.test(html), 'no style attribute survives the form, so none is written');
+});
+
+test('markdownToFieldHtml: a table becomes a list, losing no cell', () => {
+  const html = markdownToFieldHtml('| | Polling | Real event |\n|---|---|---|\n| Quem dispara | timer | Service Bus |');
+  assert.ok(!html.includes('<table'), 'no table element');
+  assert.ok(html.includes('<ul>') && html.includes('</ul>'));
+  assert.ok(html.includes('<b>Quem dispara</b>'), 'first cell is the row label');
+  assert.ok(html.includes('<b>Polling</b>: timer'), 'column header labels its value');
+  assert.ok(html.includes('<b>Real event</b>: Service Bus'));
+});
+
+test('markdownToFieldHtml: a non-empty first header prefixes the row label', () => {
+  const html = markdownToFieldHtml('| # | Cenário |\n|---|---|\n| 1 | Só uma condição |');
+  assert.ok(html.includes('<b>#: 1</b>'), 'the first column header is not dropped');
+  assert.ok(html.includes('Só uma condição'));
+});
+
+test('markdownToFieldHtml: header-only table degrades to a line, not a torn block', () => {
+  const html = markdownToFieldHtml('| a | b |\n|---|---|');
+  assert.ok(html.includes('<b>a · b</b>'));
+  assert.ok(!html.includes('|---|'), 'delimiter row is consumed');
+});
+
+test('markdownToFieldHtml: bold uses <b>, the tag verified to survive the form', () => {
+  const html = markdownToFieldHtml('**forte**');
+  assert.ok(html.includes('<b>forte</b>'));
+  assert.ok(!html.includes('<strong>'));
+});
+
+test('markdownToFieldHtml: comment profile is untouched by the field profile', () => {
+  const md = '| a | b |\n|---|---|\n| 1 | 2 |';
+  assert.ok(markdownToHtml(md).includes('<table'), 'comments still get a real table');
+  assert.ok(markdownToHtml(md).includes('style='), 'comments still get the inline styles');
+});
+
+// ── assertRenderableFieldValue: the guard that WI 67322 needed ───────────────
+test('assertRenderableFieldValue: refuses raw markdown in a long-form field', () => {
+  assert.throws(
+    () => assertRenderableFieldValue('System.Description', '## Título\n\n**negrito**'),
+    /raw markdown heading[\s\S]*markdownToFieldHtml/
+  );
+});
+
+test('assertRenderableFieldValue: converted HTML passes', () => {
+  const html = markdownToFieldHtml('## Título\n\n**negrito**\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+  assert.doesNotThrow(() => assertRenderableFieldValue('System.Description', html));
+});
+
+test('assertRenderableFieldValue: a one-line value is never a formatting question', () => {
+  assert.doesNotThrow(() => assertRenderableFieldValue('Custom.Status', '**Open**'));
+});
+
+test('assertRenderableFieldValue: force is the deliberate override', () => {
+  assert.doesNotThrow(() => assertRenderableFieldValue('System.Description', '## a\nb', { force: true }));
 });
 
 // ── stripHtml: table read-back ────────────────────────────────────────────────

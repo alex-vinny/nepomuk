@@ -122,7 +122,7 @@ const KNOWN_FLAGS = new Set([
   'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'as-comment', 'assignee',
   'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
   'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
-  'fields', 'file', 'filter', 'force', 'full', 'h', 'help', 'hours', 'ids', 'json', 'line',
+  'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'json', 'line',
   'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'pat',
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
@@ -556,7 +556,7 @@ async function resolveInlineAnchor({ config, p, filePath, lineNumber, iterations
         if (lineNumber > lineCount) {
           throw new Error(
             `Line ${lineNumber} does not exist in "${canonicalPath}" (${side} side has ${lineCount} line(s)). `
-            + `The diff used to pick this line is stale — re-run git-diff-analysis with --force and use --output lines.`
+            + `The diff used to pick this line is stale — re-read the PR diff and use the new right-hand line numbers.`
           );
         }
       }
@@ -711,7 +711,7 @@ async function cmdPrComment(rawUrl, text, flags, config) {
         + `  reviewed: ${verdict.expected}\n`
         + `  current:  ${verdict.actual || '(unknown)'}\n`
         + 'Nothing was posted. Line numbers from the old diff may now point at different code — '
-        + 're-run git-diff-analysis with --force, re-check the anchors, then post against the new head.');
+        + 're-read the diff, re-check the anchors, then post against the new head.');
     }
     console.error(`  note: head confirmed at ${verdict.actual} (matched ${verdict.expected}).`);
   }
@@ -726,8 +726,8 @@ async function cmdPrComment(rawUrl, text, flags, config) {
   }
 
   // A second thread on a line that already has one is nearly always a repeat of a
-  // finding, not a new one — and nothing in the flow surfaces it, so it used to be
-  // caught by grepping `pr comments` by hand on a PR with 47 threads.
+  // finding, not a new one, and nothing else in the flow surfaces it — on a PR with
+  // dozens of threads the alternative is grepping `pr comments` by hand.
   if (filePath && !flags['allow-duplicate']) {
     const existing = await findThreadsAt({ config, p, filePath, lineNumber });
     if (existing.length) {
@@ -755,9 +755,9 @@ async function cmdPrComment(rawUrl, text, flags, config) {
 
 // `pr link` / `wi link` — emit the canonical reference line instead of retyping it.
 // The project comes from the PR's own repository object / the work item's Area path
-// root; it is never assumed, because several EVUP repos live outside ELOS and work
-// items are split between the `EVUP` and `Kanban EL` boards. A hand-built link with
-// the wrong project segment has already been published once.
+// root and is never assumed: an org can hold repos spread across several projects
+// and work items split across more than one board, so a hand-built link is one
+// wrong segment away from pointing nowhere.
 async function cmdPrLink(rawUrl, flags, config) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   const data = await pr.getPullRequest({ config, ...p });
@@ -900,17 +900,17 @@ async function cmdPrCreate(rawUrl, flags, config) {
   if (!flags.title || flags.title === true) die('Missing --title "<text>".');
 
   let description = (flags.desc && flags.desc !== true) ? unescapeDescription(flags.desc) : '';
-  // Aceita --desc-file (documentado) ou --body-file (alias, igual aos demais comandos)
-  // para não ignorar silenciosamente a descrição passada por arquivo.
+  // Accept --desc-file (documented) or --body-file (an alias, so the flag matches every
+  // other command) rather than silently ignoring a description passed in a file.
   const descFile = flags['desc-file'] || flags['body-file'];
   if (descFile) {
     try { description = require('fs').readFileSync(descFile, 'utf8'); }
     catch (e) { die(`Could not read description file "${descFile}": ${e.message}`); }
   }
 
-  // Azure DevOps limita a descrição da PR a 4000 caracteres (a API devolve HTTP 400
+  // Azure DevOps caps a PR description at 4000 characters (the API answers HTTP 400
   // "A description for a pull request must not be longer than 4000 characters").
-  // Validamos antes da chamada para falhar com mensagem clara em vez do 400 cru.
+  // Validate before the call so the failure is a clear message, not an opaque 400.
   const MAX_PR_DESCRIPTION = 4000;
   if (description.length > MAX_PR_DESCRIPTION) {
     die(`PR description has ${description.length} characters; Azure DevOps allows at most ${MAX_PR_DESCRIPTION}. `
@@ -1021,7 +1021,7 @@ async function cmdWiFields(rawUrl, flags, config) {
 }
 
 async function cmdWiField(rawUrl, field, config, flags) {
-  if (!field) die('Missing field reference name. e.g. "Custom.CausaRaiz", "Microsoft.VSTS.TCM.ReproSteps". Run `wi layout <wi-url|id>` to list them.');
+  if (!field) die('Missing field reference name. e.g. "Custom.RootCause", "Microsoft.VSTS.TCM.ReproSteps". Run `wi layout <wi-url|id>` to list them.');
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
   const data = await wi.getWorkItem({ config, ...p });
   const v = (data.fields || {})[field];
@@ -1037,6 +1037,11 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
     catch (e) { die(`Could not read --body-file "${flags['body-file']}": ${e.message}`); }
   }
   if (content === '' && !flags['allow-empty']) die('Missing value. Provide it inline or via --body-file <path> (use --allow-empty to clear a field).');
+  // Author in Markdown, store HTML. The form renders HTML only; markdown written into
+  // it is kept literally, with asterisks and pipe rows visible on the board. The
+  // 'field' profile drops inline styles and turns tables into lists, which is what
+  // survives the form's sanitizer.
+  if (flags['from-markdown']) content = wi.markdownToFieldHtml(content);
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
 
   // --verify: refuse a rewrite that silently drops a fact, or that carries markup
@@ -1058,12 +1063,16 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
     }
   }
 
+  // Run the render guard before the dry-run print too, so a preview that says "would
+  // set" is a preview of a write that would actually succeed.
+  wi.assertRenderableFieldValue(field, content, { force: flags.force });
+
   if (flags['dry-run']) {
     console.log(`DRY RUN — nothing written to #${p.id}.`);
     console.log(`Would set "${field}" to ${content.length} char(s).`);
     return;
   }
-  const res = await wi.setField({ config, ...p, field, value: content });
+  const res = await wi.setField({ config, ...p, field, value: content, force: flags.force });
   console.log(`Work item ${p.id} field "${field}" updated (rev ${res.rev}).`);
 }
 
@@ -1134,15 +1143,18 @@ async function cmdWiComment(rawUrl, text, flags, config) {
   // One-shot routing: --field <ref> puts the body into a form field instead of
   // posting a comment (same effect as `wi set-field`, no separate call).
   if (flags.field && flags.field !== true) {
-    const res = await wi.setField({ config, ...p, field: flags.field, value: content });
-    console.log(`Work item ${p.id} field "${flags.field}" updated (rev ${res.rev}) — routed from --body-file instead of a comment.`);
+    // A comment body is authored in Markdown; a field renders HTML. Routing one into
+    // the other without converting is exactly how raw markdown ends up on the board.
+    const value = wi.markdownToFieldHtml(content);
+    const res = await wi.setField({ config, ...p, field: flags.field, value, force: flags.force });
+    console.log(`Work item ${p.id} field "${flags.field}" updated (rev ${res.rev}) — routed from --body-file, converted to field HTML.`);
     return;
   }
 
-  // Field-routing gate: if the work item has long-form custom fields (Causa
-  // Raiz, Solução Implementada, ...), don't silently post a comment — surface
-  // them and force an explicit choice. Agent-agnostic: the decision fires for
-  // every caller, not just those who happen to know the field layout.
+  // Field-routing gate: if the work item has long-form custom fields (a "Root
+  // Cause" / "Implemented Solution" control, say), don't silently post a comment —
+  // surface them and force an explicit choice. Agent-agnostic: the decision fires
+  // for every caller, not just those who happen to know the field layout.
   const asComment = flags['as-comment'] || flags.force;
   if (!asComment) {
     const type = (await wi.getWorkItem({ config, ...p })).fields?.['System.WorkItemType'];
@@ -1195,12 +1207,12 @@ async function cmdWiDeleteComment(rawUrl, commentIdStr, config, flags) {
   console.log(`Work item ${p.id} comment ${commentId} deleted.`);
 }
 
-// A transition can be blocked by a field the item never had to fill before. The bare
-// PATCH surfaced that as a raw TF401320 with no hint of which field or which values,
-// so the fix was guesswork. Preflight with validateOnly=true (runs the real rule
+// A transition can be blocked by a field the item never had to fill before. A bare
+// PATCH surfaces that as a raw TF401320 with no hint of which field or which values,
+// which makes the fix guesswork. Preflight with validateOnly=true (runs the real rule
 // engine, writes nothing), then name the field and print its allowed values.
 async function cmdWiSetState(rawUrl, state, config, flags) {
-  if (!state) die('Missing state argument. e.g. "In Progress", "Aguardando CodeReview", "Done".');
+  if (!state) die('Missing state argument. e.g. "To Do", "In Progress", "Done".');
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
   const ops = [{ op: 'add', path: '/fields/System.State', value: state }];
 
@@ -1976,10 +1988,10 @@ Usage:
   azure-connector wi field       <wi-url> <fieldRef>                       # print one field's raw value (e.g. for an edit round-trip)
   azure-connector wi set-field   <wi-url> <fieldRef> [--body-file <path>] [--allow-empty]   # set ANY field from a file (HTML/markdown/plain)
   azure-connector wi comments    <wi-url> [--ids] [--raw]                  # --ids lists comment IDs (newest first); --raw dumps raw HTML
-  azure-connector wi comment     <wi-url> --body-file <path> [--field <ref>] [--as-comment]   # if the WI has long-form custom fields (Causa Raiz, etc.) it lists them and stops; --field <ref> routes the body into that field, --as-comment posts anyway
+  azure-connector wi comment     <wi-url> --body-file <path> [--field <ref>] [--as-comment]   # if the WI has long-form custom fields (a "Root Cause" control, etc.) it lists them and stops; --field <ref> routes the body into that field, --as-comment posts anyway
   azure-connector wi edit-comment <wi-url> <commentId> --body-file <path> # Markdown file (converted to HTML); inline text is not supported
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
-  azure-connector wi set-state   <wi-url> "<state>"          # e.g. "Aguardando CodeReview", "Done"
+  azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"
   azure-connector wi link-pr     <wi-url> <pr-url>           # link an existing PR to the work item
   azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]
    azure-connector wi attachments <wi-url>
@@ -2018,12 +2030,13 @@ Profiles (multi-org — a PAT is scoped to one Azure DevOps org):
 
 PAT expiry:
   A warning is printed (stderr) on every run within --pat-warn-days (default 30) of expiry.
-  The built-in PAT can't read its own expiry via the API, so the date is tracked locally;
-  when you rotate the PAT, update it: azure-connector config --pat <new> --pat-valid-to <YYYY-MM-DD>
+  A PAT without token-management scope can't read its own expiry via the API, so the date is
+  tracked locally; when you rotate the PAT, update it:
+    azure-connector config --pat <new> --pat-valid-to <YYYY-MM-DD>
   Set AZURE_PREFLIGHT=1 to network-validate the PAT before each command.
 
 Examples:
-  azure-connector config --pat <token> --org <org> --pat-valid-to 2027-04-16
+  azure-connector config --pat <token> --org <org> --pat-valid-to <YYYY-MM-DD>
   azure-connector whoami
   azure-connector pr get https://dev.azure.com/contoso/Platform/_git/Platform/pullrequest/123
   azure-connector pr comment https://dev.azure.com/.../pullrequest/123 --body-file ./review.md
@@ -2033,9 +2046,9 @@ Examples:
   azure-connector wi comment https://dev.azure.com/.../edit/62576 --body-file ./comment.html
   azure-connector wi attachments https://dev.azure.com/.../edit/62576
   azure-connector wi download https://dev.azure.com/.../edit/62576 1 --out /tmp
-  azure-connector build last  --project Platform --branch features/65373_midia --definition ui-customer
-  azure-connector build rerun --project Platform --branch features/65373_midia --definition ui-customer          # preview
-  azure-connector build rerun --project Platform --branch features/65373_midia --definition ui-customer --yes    # queue it
+  azure-connector build last  --project Platform --branch features/1234-new-widget --definition web-ui
+  azure-connector build rerun --project Platform --branch features/1234-new-widget --definition web-ui          # preview
+  azure-connector build rerun --project Platform --branch features/1234-new-widget --definition web-ui --yes    # queue it
   azure-connector build rerun 40587 --project Platform --yes                                                          # re-run a specific build id
 
 Comment file formats:
