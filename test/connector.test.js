@@ -15,6 +15,8 @@ const { normalizeBranchRef, buildRerunPayload, summarizeBuild } = require('../li
 const {
   markdownToHtml, markdownToFieldHtml, assertRenderableFieldValue,
   attachmentUploadUrl, attachmentRelation, checkAttachment, attachFile, ATTACHMENT_MAX_BYTES,
+  commentFingerprint, assertCommentLength, COMMENT_MAX_CHARS, embedLocalImages, attachmentEmbedUrl,
+  addComment, editComment,
 } = require('../lib/workitem');
 const { request } = require('../lib/api');
 const http = require('node:http');
@@ -708,4 +710,255 @@ test('attachFile: a string body is refused — .length is characters and the JSO
                        project: 'P', id: 1, fileName: 'a.csv', buffer: 'id,name\n1,ação\n' }),
     /needs a Buffer, got string/,
   );
+});
+
+// -- markdownToHtml: images -------------------------------------------------
+test('markdownToHtml: image becomes a real <img>, not escaped markup', () => {
+  const url = 'https://dev.azure.com/acme/P/_apis/wit/attachments/abc?fileName=shot.png';
+  const html = markdownToHtml(`antes\n\n![a legenda](${url})\n\ndepois`);
+  assert.ok(html.includes(`<img src="${url}" alt="a legenda">`), 'emits a real <img>');
+  assert.ok(!/&lt;img/.test(html), 'tag is not escaped');
+  assert.ok(!/!\[/.test(html), 'markdown syntax is consumed');
+  assert.ok(!/IMAGE\d/.test(html), 'no leftover placeholder marker');
+  assert.ok(!/<p><img/.test(html), 'a standalone image is not wrapped in <p>');
+});
+
+test('markdownToHtml: image url keeps its query string and & is escaped once', () => {
+  const html = markdownToHtml('![x](https://h/a?fileName=a.png&download=false)');
+  assert.ok(html.includes('fileName=a.png&amp;download=false'), 'ampersand escaped exactly once');
+  assert.ok(!html.includes('&amp;amp;'), 'not double-escaped');
+});
+
+test('markdownToFieldHtml: image survives the field profile too', () => {
+  const html = markdownToFieldHtml('![y](https://h/a.png)');
+  assert.ok(html.includes('<img src="https://h/a.png" alt="y">'));
+});
+
+// -- commentFingerprint ------------------------------------------------------
+test('commentFingerprint: matches after Azure rewrites the attachment url', () => {
+  const sent = '<p>Resposta do suporte</p>\n<img src="https://dev.azure.com/acme/GUID-A/_apis/wit/attachments/x?fileName=a.png" alt="s">';
+  const stored = '<p>Resposta do suporte</p>\n<img src="https://dev.azure.com/acme/GUID-B/_apis/wit/attachments/x?fileName=a.png" alt="s">';
+  assert.equal(commentFingerprint(sent), commentFingerprint(stored));
+});
+
+test('commentFingerprint: different prose does not match', () => {
+  assert.notEqual(commentFingerprint('<p>uma coisa</p>'), commentFingerprint('<p>outra coisa</p>'));
+});
+
+test('commentFingerprint: empty body yields an empty fingerprint', () => {
+  assert.equal(commentFingerprint(''), '');
+  assert.equal(commentFingerprint(null), '');
+});
+
+// -- comment length guard ----------------------------------------------------
+test('assertCommentLength: a body at the cap passes', () => {
+  assert.doesNotThrow(() => assertCommentLength('x'.repeat(COMMENT_MAX_CHARS)));
+});
+
+test('assertCommentLength: one character over is refused, and says why', () => {
+  assert.throws(
+    () => assertCommentLength('x'.repeat(COMMENT_MAX_CHARS + 1)),
+    /drops the excess WITHOUT failing/,
+  );
+});
+
+test('assertCommentLength: an empty or missing body is fine', () => {
+  assert.doesNotThrow(() => assertCommentLength(''));
+  assert.doesNotThrow(() => assertCommentLength(null));
+});
+
+// -- embedLocalImages --------------------------------------------------------
+test('embedLocalImages: a local png becomes a data: URI and is reported', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'az-img-'));
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  fs.writeFileSync(path.join(dir, 'shot.png'), png);
+  const { markdown, embedded } = embedLocalImages('antes\n\n![a](./shot.png)', { baseDir: dir });
+  assert.ok(markdown.includes(`![a](data:image/png;base64,${png.toString('base64')})`));
+  assert.equal(embedded.length, 1);
+  assert.equal(embedded[0].bytes, png.length);
+});
+
+test('embedLocalImages: remote and data: references are left alone', () => {
+  const src = '![a](https://h/x.png) ![b](data:image/png;base64,AAAA)';
+  const { markdown, embedded } = embedLocalImages(src, { baseDir: os.tmpdir() });
+  assert.equal(markdown, src);
+  assert.equal(embedded.length, 0);
+});
+
+test('embedLocalImages: a missing file fails loudly, naming the resolved path', () => {
+  assert.throws(
+    () => embedLocalImages('![a](./nope.png)', { baseDir: os.tmpdir() }),
+    /Could not read image "\.\/nope\.png"/,
+  );
+});
+
+test('embedLocalImages: a non-image extension is refused', () => {
+  assert.throws(
+    () => embedLocalImages('![a](./notes.txt)', { baseDir: os.tmpdir() }),
+    /not an embeddable type/,
+  );
+});
+
+// -- attachmentEmbedUrl ------------------------------------------------------
+const GUID_URL = 'https://dev.azure.com/acme/c2d5f3a7-71a5-46d5-bf58-e708d230116c'
+  + '/_apis/wit/attachments/d165eb1a-5730-4a76-9977-46179580b9d0?fileName=shot.png';
+
+test('attachmentEmbedUrl: the project guid is replaced by the project name', () => {
+  const out = attachmentEmbedUrl({ url: GUID_URL, org: 'acme', project: 'Platform' });
+  assert.equal(
+    out,
+    'https://dev.azure.com/acme/Platform/_apis/wit/attachments/d165eb1a-5730-4a76-9977-46179580b9d0?fileName=shot.png',
+  );
+});
+
+test('attachmentEmbedUrl: a project name with a space is encoded', () => {
+  const out = attachmentEmbedUrl({ url: GUID_URL, org: 'acme', project: 'Contoso - Field Ops' });
+  assert.ok(out.includes('/Contoso%20-%20Field%20Ops/_apis/wit/attachments/'));
+});
+
+test('attachmentEmbedUrl: fileName is kept, and encoded once', () => {
+  const out = attachmentEmbedUrl({ url: GUID_URL, org: 'acme', project: 'P', fileName: 'a b.png' });
+  assert.ok(out.endsWith('?fileName=a%20b.png'));
+  assert.ok(!out.includes('%2520'));
+});
+
+test('attachmentEmbedUrl: a url that is not an attachment is returned untouched', () => {
+  const other = 'https://dev.azure.com/acme/P/_apis/wit/workItems/1';
+  assert.equal(attachmentEmbedUrl({ url: other, org: 'acme', project: 'P' }), other);
+});
+
+// ── addComment / editComment: a failed call that still stored the write ──────
+// Azure can answer an error AFTER storing the comment. These drive the lib against a
+// loopback server that does exactly that, and assert the error says so instead of
+// inviting a retry that would post a duplicate.
+async function withAzureStub(handler, fn) {
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => handler(req, res, Buffer.concat(chunks).toString('utf8')));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const config = { baseUrl: `http://127.0.0.1:${server.address().port}`, org: 'acme', pat: 'x' };
+  try { return await fn(config); } finally { server.close(); }
+}
+const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+
+test('addComment: an error after the comment was stored names the stored id and says not to retry', async () => {
+  let stored = null;
+  await withAzureStub((req, res, body) => {
+    if (req.method === 'POST') {
+      stored = JSON.parse(body).text;
+      return json(res, 400, { message: 'Sequence contains no elements' });
+    }
+    return json(res, 200, { comments: [{ id: 77, text: stored, createdDate: new Date().toISOString() }] });
+  }, async (config) => {
+    await assert.rejects(
+      addComment({ config, project: 'P', id: 1, text: 'Uma **nota** qualquer.' }),
+      (err) => {
+        assert.equal(err.landedCommentId, 77);
+        assert.match(err.message, /WAS stored anyway \(id 77\)/);
+        assert.match(err.message, /Do NOT retry/);
+        return true;
+      }
+    );
+  });
+});
+
+test('addComment: an error with nothing stored stays a plain error, with no landed id', async () => {
+  await withAzureStub((req, res) => {
+    if (req.method === 'POST') return json(res, 400, { message: 'bad request' });
+    return json(res, 200, { comments: [{ id: 5, text: '<p>outro texto</p>', createdDate: new Date().toISOString() }] });
+  }, async (config) => {
+    await assert.rejects(
+      addComment({ config, project: 'P', id: 1, text: 'Texto novo.' }),
+      (err) => {
+        assert.equal(err.landedCommentId, undefined);
+        assert.doesNotMatch(err.message, /stored anyway/);
+        return true;
+      }
+    );
+  });
+});
+
+test('addComment: an older comment with the same text does not count as landed', async () => {
+  await withAzureStub((req, res, body) => {
+    if (req.method === 'POST') return json(res, 400, { message: 'bad request' });
+    const old = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    return json(res, 200, { comments: [{ id: 9, text: '<p>Texto repetido.</p>', createdDate: old }] });
+  }, async (config) => {
+    await assert.rejects(
+      addComment({ config, project: 'P', id: 1, text: 'Texto repetido.' }),
+      (err) => err.landedCommentId === undefined
+    );
+  });
+});
+
+test('editComment: an error after the edit was applied says so', async () => {
+  let stored = null;
+  await withAzureStub((req, res, body) => {
+    if (req.method === 'PATCH') {
+      stored = JSON.parse(body).text;
+      return json(res, 400, { message: 'Sequence contains no elements' });
+    }
+    return json(res, 200, { id: 42, text: stored });
+  }, async (config) => {
+    await assert.rejects(
+      editComment({ config, project: 'P', id: 1, commentId: 42, text: 'Texto editado.' }),
+      (err) => {
+        assert.equal(err.landedCommentId, 42);
+        assert.match(err.message, /edit WAS applied anyway/);
+        return true;
+      }
+    );
+  });
+});
+
+// ── wi create (CLI, dry-run only — no network) ───────────────────────────────
+// Each run points the config at a file that does not exist and the base url at a closed
+// port, so the test can never read a real config or reach a real org.
+const { spawnSync } = require('node:child_process'); // fs, os and path are required above
+
+function runCli(args) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'azc-create-'));
+  const env = {
+    ...process.env,
+    AZURE_CONFIG_FILE: path.join(dir, 'none.json'),
+    AZURE_PAT: 'dummy', AZURE_ORG: 'acme', AZURE_BASE_URL: 'http://127.0.0.1:9',
+  };
+  const res = spawnSync(process.execPath, [path.join(__dirname, '..', 'index.js'), ...args(dir)], { env, encoding: 'utf8' });
+  fs.rmSync(dir, { recursive: true, force: true });
+  return res;
+}
+
+test('wi create: without --yes prints the plan and creates nothing', () => {
+  const res = runCli((dir) => {
+    fs.writeFileSync(path.join(dir, 'b.md'), '## Pedido\n\n- um\n- dois\n');
+    return ['wi', 'create', '--project', 'Platform', '--type', 'Bug', '--title', 'T',
+      '--body-file', path.join(dir, 'b.md'), '--from-markdown', '--area', 'Platform\\Team', '--parent', '#12'];
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /DRY RUN — nothing was created/);
+  assert.match(res.stdout, /System.Description: <h2>Pedido<\/h2>/);
+  assert.match(res.stdout, /<li>um<\/li> <li>dois<\/li>/, 'the description went through the field converter');
+  assert.match(res.stdout, /System.AreaPath: Platform\\Team/);
+  assert.match(res.stdout, /parent {5}: #12/);
+});
+
+test('wi create: the dry run already refuses a body the form would not render', () => {
+  const res = runCli((dir) => {
+    fs.writeFileSync(path.join(dir, 'raw.md'), '## Pedido\n\n**cru**\n');
+    return ['wi', 'create', '--project', 'Platform', '--type', 'Bug', '--title', 'T', '--body-file', path.join(dir, 'raw.md')];
+  });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /Refusing to write "System.Description"/);
+  assert.doesNotMatch(res.stdout, /DRY RUN/, 'no preview of a write that would be refused');
+});
+
+test('wi create: missing --type or --title fails before anything else', () => {
+  const noType = runCli(() => ['wi', 'create', '--project', 'Platform', '--title', 'T']);
+  assert.equal(noType.status, 1);
+  assert.match(noType.stderr, /Missing --type/);
+  const noTitle = runCli(() => ['wi', 'create', '--project', 'Platform', '--type', 'Bug']);
+  assert.equal(noTitle.status, 1);
+  assert.match(noTitle.stderr, /Missing --title/);
 });

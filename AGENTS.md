@@ -197,12 +197,14 @@ effect the moment it is invoked.**
 | `wi comment` | **yes** | field-routing gate (exit 2) |
 | `wi edit-comment`, `wi delete-comment` | **yes** | none |
 | `wi set-estimate`, `wi create-task`, `wi link-pr` | **yes** | none |
+| `wi create` | **yes** | **requires `--yes`**; previews otherwise, and the render guard runs on the preview too |
+| `wi attach` | **yes** | **requires `--yes`**; previews otherwise |
 | `wiki list|pages|get` | no | — |
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
 
-`build rerun` is the only command that refuses to act without `--yes`. Do not assume that
-convention elsewhere.
+`build rerun`, `wi create` and `wi attach` are the only commands that refuse to act without
+`--yes`. Do not assume that convention elsewhere.
 
 ---
 
@@ -468,12 +470,13 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi set-field <url\|id> <fieldRef> ["<value>"]` | `--body-file`, `--from-markdown`, `--allow-empty`, `--verify`, `--against <file>`, `--force`, `--dry-run` | Inline scalar or file body. See §8.1–8.2. `--allow-empty` is required to clear a field. **Writes.** |
 | `wi missing <url\|id>` | `--all`, `--type`, `--json` | Form layout joined to current values, so "which fields are unanswered?" is answerable at all. Reports `empty`, `placeholder` and `filled` separately — a lone `.`, `-` or `n/a` reads as filled everywhere else but says nothing. Defaults to custom long-form controls; `--all` covers every control on the form. |
 | `wi comments <url\|id>` | `--ids`, `--raw`, `--project` | Default view is rendered with `[1]`/`[2]` display indices. `--ids` lists the **real comment ids** needed to edit. `--raw` dumps the source HTML so an edit can be minimal. |
-| `wi comment <url\|id>` | `--body-file` (**required**), `--field <ref>`, `--as-comment` (alias `--force`) | See §7.3. **Writes, exit 2 on the gate.** |
-| `wi edit-comment <url\|id> <commentId>` | `--body-file` (**required**) | Get the id from `wi comments --ids`. **Writes, no dry-run.** |
-| `wi delete-comment <url\|id> <commentId>` | — | Azure soft-deletes it. **Writes, no dry-run.** |
+| `wi comment <url\|id>` | `--body-file` (**required**), `--field <ref>`, `--as-comment` (alias `--force`) | See §7.3. A local image (`![alt](./shot.png)`, relative to the body file) is inlined as base64, and a body over **65,536** characters of HTML is refused — Azure would silently drop the excess. If Azure answers an error **after** storing the comment, the error names the stored id and says not to retry. The project comes from the item's Area path unless `--project` is passed. **Writes, exit 2 on the gate.** |
+| `wi edit-comment <url\|id> <commentId>` | `--body-file` (**required**) | Get the id from `wi comments --ids`. Same image inlining, length cap, stored-anyway check and Area-path project as `wi comment`. **Writes, no dry-run.** |
+| `wi delete-comment <url\|id> <commentId>` | — | Azure soft-deletes it. Project from the Area path, as above. **Writes, no dry-run.** |
 | `wi set-state <url\|id> "<state>"` | `--no-preflight`, `--dry-run`, `--type` | See §8.6. **Writes.** |
 | `wi set-estimate <url\|id> <hours>` | — | Writes `OriginalEstimate` **and** `RemainingWork`. **Never touches `CompletedWork`**, despite the name. This is the *opening* move. **Writes, no dry-run.** |
 | `wi complete <url\|id> --hours <n>` | `--dry-run` | The closing move: `CompletedWork = n`, `RemainingWork = 0`. A board that gates `Done` on `CompletedWork` rejects the transition until this runs. Pass `--hours 0` when the task closed without delivery — the record should not claim work that did not happen. **Writes.** |
+| `wi create --project <p> --type "<type>" --title "<t>"` | `--body-file` (+ `--from-markdown`), `--desc`, `--area`, `--iteration`, `--assignee <email>`, `--activity <name>`, `--parent <id>`, `--org`, `--force`, `--yes` | Creates a work item of **any** type (Product Backlog Item, Bug, Feature, …); the body goes to `System.Description`. Prints the resolved plan and exits unless `--yes`. The render guard runs on every field **before** the preview, so a preview never shows a create the lib would refuse. `--parent` links it as a child. **Writes only with `--yes`.** |
 | `wi create-task <parent-url\|id> "<title>"` | `--estimate <h>`, `--desc`, `--assignee <email>`, `--activity <name>` | Creates a `Task` as a child. **Inherits the parent's Area Path, Iteration Path and Assignee** unless overridden. `--activity` defaults to `Development` because some processes make Activity required, and a Task created without it fails with `TF401320`. **Writes, no dry-run.** |
 | `wi link-pr <wi-url\|id> <pr-url\|id>` | — | Adds the ArtifactLink relation. Resolves the PR's project/repo ids automatically; works across projects in one org. **Writes, no dry-run.** |
 | `wi link <url\|id>` | `--no-type` | Prints the canonical reference line, with the project taken from the **root segment of the Area path** — which is always the project name. Warns on stderr when that disagrees with a passed `--project`. Read-only. |
@@ -642,7 +645,8 @@ same numbers.
 ## 11. Operating rules for an autonomous caller
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
-   no `--dry-run`. Only `build rerun` refuses to act without confirmation.
+   no `--dry-run`. Only `build rerun`, `wi create` and `wi attach` refuse to act without
+   confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.
 3. **Treat exit 2 as a question, not a failure.** Re-issue with `--field <ref>` or
@@ -677,13 +681,16 @@ same numbers.
 npm test      # or: node --test
 ```
 
-152 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
-the three transport tests, which drive `request()` against a throwaway `127.0.0.1`
-server on an ephemeral port — the only way to assert that a binary body leaves as bytes.
+176 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+two kinds. The transport and comment tests drive the lib against a throwaway `127.0.0.1`
+server on an ephemeral port — the only way to assert that a binary body leaves as bytes,
+and that an error Azure returns *after* storing a comment is reported as stored. The
+`wi create` tests spawn the CLI in dry-run with a non-existent config file and a closed
+base url, so they can never read a real config or reach a real org.
 
 | File | Covers |
 |---|---|
-| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles, the render guard, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
+| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles, the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 

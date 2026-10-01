@@ -794,6 +794,89 @@ node index.js wi comment <wi-url> --body-file ./update.html --as-comment        
 
 Work item comments require `--body-file`. Inline text arguments are not supported.
 
+##### The project comes from the item, not from your config
+
+`wi comments`, `wi comment`, `wi edit-comment` and `wi delete-comment` resolve the project from
+the work item's **Area path** root, exactly like `wi attach`, and print a note when that differs
+from the project you passed or have saved. An explicit `--project` still wins.
+
+This is not cosmetic. A work item id is unique across the org, so Azure happily answers a comment
+call sent through the *wrong* project's endpoint — and then resolves anything the body references
+inside that wrong project. A comment carrying an attachment url used to die with
+`Sequence contains no elements` **after** storing the comment, because the attachment lived in the
+item's real project. The same mismatch also made the field-routing gate read the wrong project's
+work-item type definition.
+
+##### A failed comment write may already have been written
+
+Azure can fail a comment POST/PATCH *after* it stored the text. Believing the error and retrying
+posts the same comment twice. So on failure both calls re-read the item and say so:
+
+```
+HTTP 400 Bad Request
+...
+The comment WAS stored anyway (id 185980) — Azure failed after writing it.
+Do NOT retry, that posts a duplicate. Edit it with "wi edit-comment 66360 185980 --body-file <path>"
+or remove it with "wi delete-comment 66360 185980".
+```
+
+The check matches on a tag-stripped fingerprint of the body, because Azure rewrites attachment
+urls inside the HTML it stores.
+
+##### Images
+
+Two ways to put a picture in a comment or a long-form field. Both are supported here.
+
+**By attachment (preferred).** `wi attach` prints the url to use:
+
+```bash
+node index.js wi attach <wi-url> ./shot.png --yes
+# Attached "shot.png" to #66360 — 17807 bytes, 3 relation(s) on the item now.
+# https://dev.azure.com/acme/c2d5f3a7-…/_apis/wit/attachments/d165eb1a-…
+#
+# To show it inside a comment or a field, use this url (the one above carries the
+# project guid, which a comment body refuses):
+# https://dev.azure.com/acme/Platform/_apis/wit/attachments/d165eb1a-…?fileName=shot.png
+```
+
+Then reference it: `![alt](<that url>)`. Full resolution, and it costs the body nothing.
+
+> ⚠️ **The project segment must not be a guid.** This is the whole trap, and it is not
+> documented anywhere: a comment body carrying
+> `…/{projectGuid}/_apis/wit/attachments/{id}` answers HTTP 400 (`Sequence contains no
+> elements`, or `TF401349`) **after** storing the comment, with the tag escaped and the query
+> string stripped. The *same attachment* referenced with the project **name**, with no project
+> segment, or as a site-relative path is accepted and rendered. And the guid form is exactly what
+> Azure hands back from the upload — so `wi attach` prints the usable one for you.
+>
+> Measured on a live work item on 2026-09-23, holding everything else constant: api-versions `7.0-preview.3`
+> and `7.1-preview.4`, `format=html` and `format=markdown` on the query (the parameter the
+> official *Add Work Item Comment* reference documents), markdown and raw HTML. Only the project
+> segment changes the outcome. A control with the same request and no attachment url returns 200.
+
+**By base64.** `![alt](./shot.png)` reads the local file and embeds it as a `data:` URI; the note
+on stderr says what it cost. Useful when the picture should not also be an attachment.
+
+```bash
+node index.js wi comment <wi-url> --body-file ./update.md
+# note: embedded ./crop.png — 17807 bytes on disk, 23744 as base64.
+```
+
+> ⚠️ **Base64 has a ceiling, and overflowing it is silent.** It costs 4/3 of the file, and a
+> comment body is capped at **65.536 characters** — measured, 65.461 kept its image, 65.596 lost
+> it. Over the cap Azure does **not** fail: it drops the `src` and saves `<img alt="…">`, so the
+> comment looks posted and has no picture. `wi comment` / `wi edit-comment` refuse an oversized
+> body for that reason. To fit a screenshot, crop it and cut the palette —
+> `ffmpeg -i in.png -vf "crop=W:H:X:Y,split[a][b];[a]palettegen=max_colors=64[p];[b][p]paletteuse" out.png`
+> took a 126 KB capture to 17,8 KB.
+
+**Fields behave differently from comments**, so pick per surface:
+
+| | attachment url | `data:` base64 |
+|---|---|---|
+| **long-form field** (Description, Causa Raiz, …) | ✅ any form, guid included | ❌ `TF401324: Value … is too long` — loud, nothing written |
+| **comment** | ✅ project **name** / no project · ❌ project **guid** | ✅ up to 65.536 chars of body |
+
 ##### Field-routing gate
 
 Analysis (root cause, solution, requirements) belongs in a work item's **dedicated
@@ -901,6 +984,36 @@ node index.js wi link-pr <wi-url> <pr-url>
 Adds an ArtifactLink relation from the work item to an existing PR (the same link
 `pr create --work-items` creates at creation time). Resolves the PR's project/repo ids
 automatically. Works across projects in the same org.
+
+---
+
+#### Create a work item of any type
+
+```bash
+node index.js wi create --project <p> --type "<Work Item Type>" --title "<t>" \
+  [--body-file <path> [--from-markdown]] [--desc "<text>"] \
+  [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--activity <name>] \
+  [--parent <id>] [--yes]
+```
+
+`create-task` only makes Tasks, and only under a parent; `raw` cannot help either, because
+creating a work item takes `application/json-patch+json`. `wi create` opens a Product
+Backlog Item, Bug, Feature or any other type the process defines.
+
+- **Previews unless `--yes`.** Without it the resolved plan (org, project, type, title and
+  every field) is printed and nothing is created.
+- The body (`--body-file`, or `--desc` inline) goes to `System.Description`. With
+  `--from-markdown` it is converted with the `field` profile.
+- **The render guard runs before the preview.** A body with raw markdown is refused on the
+  dry run as well, so a preview is always a preview of a create that would succeed.
+- `--parent <id>` links the new item as a child of `<id>`.
+
+```bash
+node index.js wi create --project Platform --type "Product Backlog Item" \
+  --title "Bulk transfer of cards" --body-file ./pbi.md --from-markdown \
+  --area 'Platform\Team A' --iteration 'Platform\Sprint 12' --assignee dev@contoso.com
+# DRY RUN — nothing was created. Re-run with --yes to create.
+```
 
 ---
 
