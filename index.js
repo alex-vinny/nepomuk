@@ -120,11 +120,11 @@ function parseArgs(argv) {
 // that read the error and correct themselves. `--no-strict-flags` is the escape
 // hatch for a genuinely unattended pipeline.
 const KNOWN_FLAGS = new Set([
-  'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'as-comment', 'assignee',
+  'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'area', 'as-comment', 'assignee',
   'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
   'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
-  'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'json', 'line',
-  'name', 'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'pat',
+  'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'iteration', 'json', 'line',
+  'name', 'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'parent', 'pat',
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
@@ -1105,8 +1105,28 @@ async function cmdWiLayout(rawUrl, flags, config) {
   }
 }
 
+// A work item's project is the root of its Area path, not whatever project the config
+// happens to default to. Posting a comment through the wrong project's endpoint still
+// stores it (Azure resolves the item by id, which is org-unique), but every attachment
+// url inside the body is then looked up in that wrong project, and the call dies with
+// "Sequence contains no elements" — after the comment is already on the item. Seen in
+// practice: item in one project, saved default another, image reference unresolvable, two duplicate
+// comments left behind. The same mismatch also makes the long-form-field gate read the
+// wrong project's Bug definition. An explicit --project still wins.
+async function withWorkItemProject(p, config, flags) {
+  if (flags && flags.project && flags.project !== true) return p;
+  let fromArea = null;
+  try {
+    const item = await wi.getWorkItem({ config, ...p });
+    fromArea = links.projectFromAreaPath((item.fields || {})['System.AreaPath']);
+  } catch { /* unreachable item is the caller's problem, not this helper's */ }
+  if (!fromArea || fromArea === p.project) return p;
+  console.error(`note: work item #${p.id} lives in "${fromArea}" (its Area path), not "${p.project}" — using it.`);
+  return { ...p, project: fromArea };
+}
+
 async function cmdWiComments(rawUrl, flags, config) {
-  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const p = await withWorkItemProject(needWorkItemUrlOrId(rawUrl, config, flags), config, flags);
   const data = await wi.getComments({ config, ...p });
   if (flags && (flags.ids || flags.raw)) {
     const comments = (data.comments || []).slice().sort((a, b) => new Date(b.createdDate) - new Date(a.createdDate));
@@ -1125,6 +1145,17 @@ async function cmdWiComments(rawUrl, flags, config) {
   fmt.printWorkItemComments(data);
 }
 
+// A comment body may point at a screenshot next to it on disk. Azure will not serve an
+// attachment url from inside a comment, so the picture is inlined as base64 here, and the
+// caller is told what that cost — the body is capped and the overflow is silent.
+function inlineCommentImages(content, bodyFilePath) {
+  const { markdown, embedded } = wi.embedLocalImages(content, { baseDir: path.dirname(path.resolve(bodyFilePath)) });
+  for (const img of embedded) {
+    console.error(`note: embedded ${img.ref} — ${img.bytes} bytes on disk, ${img.base64} as base64.`);
+  }
+  return markdown;
+}
+
 async function cmdWiComment(rawUrl, text, flags, config) {
   if (text && text !== true) {
     die('Inline text is not supported for work item comments. Write the body to an HTML file and use --body-file <path>.');
@@ -1139,7 +1170,7 @@ async function cmdWiComment(rawUrl, text, flags, config) {
     die(`Could not read --body-file "${flags['body-file']}": ${e.message}`);
   }
   if (!content.trim()) die('Comment body file is empty.');
-  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const p = await withWorkItemProject(needWorkItemUrlOrId(rawUrl, config, flags), config, flags);
 
   // One-shot routing: --field <ref> puts the body into a form field instead of
   // posting a comment (same effect as `wi set-field`, no separate call).
@@ -1173,7 +1204,7 @@ async function cmdWiComment(rawUrl, text, flags, config) {
     }
   }
 
-  const result = await wi.addComment({ config, ...p, text: content });
+  const result = await wi.addComment({ config, ...p, text: inlineCommentImages(content, flags['body-file']) });
   console.log(`Comment added. ID: ${result.id}, created: ${result.createdDate}`);
 }
 
@@ -1194,8 +1225,8 @@ async function cmdWiEditComment(rawUrl, commentIdStr, text, flags, config) {
     die(`Could not read --body-file "${flags['body-file']}": ${e.message}`);
   }
   if (!content.trim()) die('Comment body file is empty.');
-  const p = needWorkItemUrlOrId(rawUrl, config, flags);
-  await wi.editComment({ config, ...p, commentId, text: content });
+  const p = await withWorkItemProject(needWorkItemUrlOrId(rawUrl, config, flags), config, flags);
+  await wi.editComment({ config, ...p, commentId, text: inlineCommentImages(content, flags['body-file']) });
   console.log(`Work item ${p.id} comment ${commentId} updated.`);
 }
 
@@ -1203,7 +1234,7 @@ async function cmdWiDeleteComment(rawUrl, commentIdStr, config, flags) {
   if (!commentIdStr) die('Missing commentId argument. Run `wi comments --ids <wi-url|id>` to list comment IDs.');
   const commentId = parseInt(commentIdStr, 10);
   if (isNaN(commentId)) die(`Invalid commentId: ${commentIdStr}`);
-  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const p = await withWorkItemProject(needWorkItemUrlOrId(rawUrl, config, flags), config, flags);
   await wi.deleteComment({ config, ...p, commentId });
   console.log(`Work item ${p.id} comment ${commentId} deleted.`);
 }
@@ -1289,6 +1320,73 @@ async function cmdWiLinkPr(rawWiUrl, rawPrUrl, config, flags) {
   if (!projectId || !repoId) die('Could not resolve PR project/repo ids.');
   await wi.linkPullRequest({ config, org: w.org, project: w.project, id: w.id, projectId, repoId, prId: pp.prId });
   console.log(`Linked PR #${pp.prId} to work item ${w.id}.`);
+}
+
+/**
+ * `wi create` — create a work item of ANY type (PBI, Bug, Feature, Epic, …).
+ *
+ * `create-task` only makes Tasks, and only under a parent; `raw` cannot help because
+ * work-item creation demands `application/json-patch+json` and `raw` sends plain JSON.
+ * Without this, opening a PBI from the CLI was impossible.
+ *
+ * Writes are gated: without --yes this prints the resolved plan and exits, matching
+ * `wi attach` and `pr comment --dry-run`.
+ */
+async function cmdWiCreate(flags, config) {
+  const project = (flags.project && flags.project !== true) ? flags.project : config.project;
+  const type = (flags.type && flags.type !== true) ? flags.type : null;
+  const title = (flags.title && flags.title !== true) ? flags.title : null;
+
+  if (!project) die('Missing --project. Usage: wi create --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>]');
+  if (!type) die('Missing --type. Example: --type "Product Backlog Item" (see: raw GET "/<project>/_apis/wit/workitemtypes").');
+  if (!title) die('Missing --title.');
+
+  const fields = { 'System.Title': title };
+
+  if (flags['body-file']) {
+    let body;
+    try { body = require('fs').readFileSync(flags['body-file'], 'utf8'); }
+    catch (e) { die(`Could not read --body-file "${flags['body-file']}": ${e.message}`); }
+    // Same contract as set-field: the form renders HTML only, so markdown must be
+    // converted rather than pasted in raw.
+    fields['System.Description'] = flags['from-markdown'] ? wi.markdownToFieldHtml(body) : body;
+  } else if (flags.desc && flags.desc !== true) {
+    fields['System.Description'] = flags.desc;
+  }
+
+  if (flags.area && flags.area !== true) fields['System.AreaPath'] = flags.area;
+  if (flags.iteration && flags.iteration !== true) fields['System.IterationPath'] = flags.iteration;
+  if (flags.assignee && flags.assignee !== true) fields['System.AssignedTo'] = flags.assignee;
+  if (flags.activity && flags.activity !== true) fields['Microsoft.VSTS.Common.Activity'] = flags.activity;
+
+  const parentId = (flags.parent && flags.parent !== true) ? String(flags.parent).match(/\d+/)?.[0] : null;
+  const org = (flags.org && flags.org !== true) ? flags.org : config.org;
+
+  // Same order as set-field: the render guard runs before the dry-run print, so a preview
+  // is a preview of a create that would actually succeed — not one the lib then refuses.
+  for (const [ref, value] of Object.entries(fields)) wi.assertRenderableFieldValue(ref, value, { force: !!flags.force });
+
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
+    console.log(`  org        : ${org}`);
+    console.log(`  project    : ${project}`);
+    console.log(`  type       : ${type}`);
+    console.log(`  title      : ${title}`);
+    for (const [k, v] of Object.entries(fields)) {
+      if (k === 'System.Title') continue;
+      const shown = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 120)}… (${v.length} chars)` : v;
+      console.log(`  ${k.padEnd(11)}: ${String(shown).replace(/\n/g, ' ')}`);
+    }
+    if (parentId) console.log(`  parent     : #${parentId}`);
+    return;
+  }
+
+  const result = await wi.createWorkItem({
+    config, org, project, type, fields, parentId, force: !!flags.force,
+  });
+  const base = (config.baseUrl || 'https://dev.azure.com').replace(/\/$/, '');
+  console.log(`Created ${type} #${result.id}: ${title}`);
+  console.log(`${base}/${org}/${encodeURIComponent(project)}/_workitems/edit/${result.id}`);
 }
 
 async function cmdWiCreateTask(rawParentUrl, title, flags, config) {
@@ -1475,13 +1573,27 @@ async function cmdWiAttach(rawUrl, filePath, flags, config) {
   const buffer = fs.readFileSync(filePath);
   const result = await wi.attachFile({ config, org: p.org, project, id: p.id, fileName, buffer, comment });
 
+  // Azure answers with the project as a GUID, and that is the one form a comment body
+  // rejects. Hand back the form that works on both surfaces so nobody has to know.
+  const embedUrl = wi.attachmentEmbedUrl({
+    url: result.url,
+    org: p.org || config.org,
+    project,
+    baseUrl: config.baseUrl && config.org ? `${config.baseUrl}/${config.org}` : null,
+    fileName: result.name,
+  });
+
   if (flags.json) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({ ...result, embedUrl }, null, 2));
     return;
   }
   const count = result.relations === null ? '' : `, ${result.relations} relation(s) on the item now`;
   console.log(`Attached "${result.name}" to #${p.id} — ${stat.size} bytes${count}.`);
   console.log(result.url);
+  if (embedUrl !== result.url) {
+    console.log(`\nTo show it inside a comment or a field, use this url (the one above carries the`);
+    console.log(`project guid, which a comment body refuses):\n${embedUrl}`);
+  }
 }
 
 async function cmdWiDownload(rawUrl, selector, flags, config) {
@@ -2074,6 +2186,9 @@ Usage:
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
   azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"
   azure-connector wi link-pr     <wi-url> <pr-url>           # link an existing PR to the work item
+  azure-connector wi create      --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>] [--from-markdown] [--activity <name>]
+                                 [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--parent <id>] [--yes]
+                                 # creates ANY type (Product Backlog Item, Bug, Feature…); dry-run unless --yes
   azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]
    azure-connector wi attachments <wi-url>
    azure-connector wi attach      <wi-url> <file> [--name <n>] [--comment "<text>"] [--allow-duplicate] [--yes] [--json]
@@ -2241,6 +2356,7 @@ async function main() {
     if (sub === 'delete-comment') return cmdWiDeleteComment(arg1, arg2, config, flags);
     if (sub === 'set-state')   return cmdWiSetState(arg1, arg2, config, flags);
     if (sub === 'link-pr')     return cmdWiLinkPr(arg1, arg2, config, flags);
+    if (sub === 'create') return cmdWiCreate(flags, config);
     if (sub === 'create-task') return cmdWiCreateTask(arg1, arg2, flags, config);
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
