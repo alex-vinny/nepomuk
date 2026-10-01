@@ -244,7 +244,7 @@ surfaces sanitize differently:
 | `field` | `wi set-field --from-markdown`, and `wi comment --field <ref>` | Emits **no** `style=` anywhere and renders every pipe table as a `<ul>`, one `<li>` per row, because the form strips inline styles and renders tables inconsistently. |
 
 Supported Markdown: `##`/`###`/`####` headings, `**bold**` (may span one newline, never a
-blank line), `` `inline code` ``, `-` and `1.` lists, `>` quotes, `---` rules, fenced code
+blank line), `` `inline code` ``, `-` and `1.` lists (nested by indentation: an indented item opens a sub-list under the item above; an indented line that is not an item is a hard-wrap continuation), `>` quotes, `---` rules, fenced code
 blocks, and GFM pipe tables. Tables require a leading and trailing `|` on every row plus a
 delimiter row (`|---|:--:|---:|`, which also sets alignment) — so prose containing a stray
 `|` is never mistaken for a table. A `|` inside inline code is content; elsewhere in a
@@ -681,7 +681,7 @@ same numbers.
 npm test      # or: node --test
 ```
 
-176 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+184 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
 two kinds. The transport and comment tests drive the lib against a throwaway `127.0.0.1`
 server on an ephemeral port — the only way to assert that a binary body leaves as bytes,
 and that an error Azure returns *after* storing a comment is reported as stored. The
@@ -690,7 +690,7 @@ base url, so they can never read a real config or reach a real org.
 
 | File | Covers |
 |---|---|
-| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles, the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
+| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 
