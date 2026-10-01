@@ -417,6 +417,51 @@ test('markdownToFieldHtml: comment profile is untouched by the field profile', (
   assert.ok(markdownToHtml(md).includes('style='), 'comments still get the inline styles');
 });
 
+// ── markdownToHtml: nested lists ─────────────────────────────────────────────
+test('markdownToFieldHtml: an indented bullet nests under its parent instead of flattening into it', () => {
+  const html = markdownToFieldHtml('- **Pai:**\n  - filho um;\n  - filho dois.\n- irmão');
+  assert.ok(html.includes('<li><b>Pai:</b><ul>\n<li>filho um;</li>\n<li>filho dois.</li>\n</ul></li>'), html);
+  assert.ok(html.includes('<li>irmão</li>'), 'the next top-level item is back at the top');
+  assert.ok(!html.includes('- filho'), 'no marker leaks into the text');
+});
+
+test('markdownToFieldHtml: bullets nest under a numbered item, three spaces deep', () => {
+  const html = markdownToFieldHtml('1. **Repo A**\n   - passo 1\n   - passo 2\n2. **Repo B**');
+  assert.ok(/<ol>\n<li><b>Repo A<\/b><ul>\n<li>passo 1<\/li>\n<li>passo 2<\/li>\n<\/ul><\/li>\n<li><b>Repo B<\/b><\/li>\n<\/ol>/.test(html), html);
+});
+
+test('markdownToFieldHtml: three levels, and dedenting two levels at once', () => {
+  const html = markdownToFieldHtml('- a\n  - b\n    - c\n- d');
+  assert.ok(html.includes('<li>a<ul>\n<li>b<ul>\n<li>c</li>\n</ul></li>\n</ul></li>\n<li>d</li>'), html);
+});
+
+test('markdownToFieldHtml: a hard-wrapped line inside a nested item is still a continuation', () => {
+  const html = markdownToFieldHtml('- pai\n  - filho que continua\n    na linha de baixo\n- outro');
+  assert.ok(html.includes('<li>filho que continua na linha de baixo</li>'), html);
+});
+
+test('markdownToFieldHtml: a nested list of the other type becomes a sibling list under the same parent', () => {
+  const html = markdownToFieldHtml('- pai\n  - x\n  1. y');
+  assert.ok(html.includes('<li>pai<ul>\n<li>x</li>\n</ul>\n<ol>\n<li>y</li>\n</ol></li>'), html);
+});
+
+test('markdownToHtml: nested list in a comment gets no <br/> between an item and its sub-list', () => {
+  const html = markdownToHtml('- pai\n  - filho');
+  assert.ok(!html.includes('<br/>'), html);
+  assert.ok(html.includes('<li>pai<ul>\n<li>filho</li>\n</ul></li>'), html);
+});
+
+test('markdownToHtml: an indented marker outside any list is not a list', () => {
+  const html = markdownToFieldHtml('texto\n\n  - recuado sem lista acima');
+  assert.ok(!html.includes('<ul>'), html);
+});
+
+test('markdownToHtml: a loose nested list (blank lines between items) stays one list', () => {
+  const html = markdownToFieldHtml('- a\n\n  - b\n\n- c');
+  assert.equal((html.match(/<ul>/g) || []).length, 2, html);
+  assert.ok(html.includes('<li>a<ul>\n<li>b</li>\n</ul></li>\n<li>c</li>'), html);
+});
+
 // ── assertRenderableFieldValue: the pre-write render guard ───────────────
 test('assertRenderableFieldValue: refuses raw markdown in a long-form field', () => {
   assert.throws(
@@ -932,14 +977,14 @@ function runCli(args) {
 
 test('wi create: without --yes prints the plan and creates nothing', () => {
   const res = runCli((dir) => {
-    fs.writeFileSync(path.join(dir, 'b.md'), '## Pedido\n\n- um\n- dois\n');
+    fs.writeFileSync(path.join(dir, 'b.md'), '## Pedido\n\n- um\n  - sub\n');
     return ['wi', 'create', '--project', 'Platform', '--type', 'Bug', '--title', 'T',
       '--body-file', path.join(dir, 'b.md'), '--from-markdown', '--area', 'Platform\\Team', '--parent', '#12'];
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /DRY RUN — nothing was created/);
   assert.match(res.stdout, /System.Description: <h2>Pedido<\/h2>/);
-  assert.match(res.stdout, /<li>um<\/li> <li>dois<\/li>/, 'the description went through the field converter');
+  assert.match(res.stdout, /<li>um<ul> <li>sub<\/li> <\/ul><\/li>/, 'the description went through the field converter');
   assert.match(res.stdout, /System.AreaPath: Platform\\Team/);
   assert.match(res.stdout, /parent {5}: #12/);
 });

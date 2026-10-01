@@ -39,7 +39,7 @@ and do not let an edit on one side propagate to the other unless explicitly inte
     HTML-escaped by the converter and shows literally (`<strong>` → `&lt;strong&gt;`, and any
     `&entity;` double-escapes to `&amp;entity;`) — the one exception is a body that is HTML from
     its first tag to its last, which is passed through untouched.
-    Supported constructs: `##`/`###`/`####` headings, `**bold**`, `` `inline code` ``, `-` lists,
+    Supported constructs: `##`/`###`/`####` headings, `**bold**`, `` `inline code` ``, `-` lists (nested by indentation — two spaces under `-`, three under `1.`),
     `1.` numbered lists, `>` block quotes, `---` rules, GFM pipe tables, and fenced code blocks
     (```` ``` ````) — the converter emits a proper `<pre><code>` block and drops the opening-fence
     info string (e.g. ```` ```ts ````).
@@ -1003,7 +1003,7 @@ Backlog Item, Bug, Feature or any other type the process defines.
 - **Previews unless `--yes`.** Without it the resolved plan (org, project, type, title and
   every field) is printed and nothing is created.
 - The body (`--body-file`, or `--desc` inline) goes to `System.Description`. With
-  `--from-markdown` it is converted with the `field` profile.
+  `--from-markdown` it is converted with the `field` profile, nested lists included.
 - **The render guard runs before the preview.** A body with raw markdown is refused on the
   dry run as well, so a preview is always a preview of a create that would succeed.
 - `--parent <id>` links the new item as a child of `<id>`.
