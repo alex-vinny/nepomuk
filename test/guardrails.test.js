@@ -237,6 +237,21 @@ test('findForbiddenMarkup: catches what the work-item form will not render', () 
   assert.ok(names('- first item').includes('raw markdown bullet'));
   assert.ok(names('```sql\nSELECT 1\n```').includes('markdown code fence'));
   assert.ok(names('fixed ✅').includes('emoji'));
+  assert.ok(names('Cenários:\n1. envia\n2. recebe').includes('raw markdown numbered list'));
+  assert.ok(names('usa `message.Body` agora').includes('raw markdown inline code'));
+  assert.ok(names('ver [o PR](https://x/pr/1)').includes('raw markdown link'));
+  assert.ok(names('Primeiro parágrafo.\n\nSegundo parágrafo.').includes('plain-text paragraphs'));
+});
+
+test('findForbiddenMarkup: the new markdown rules leave clean HTML alone', () => {
+  const html = '<p>Primeiro.</p>\n\n<ol>\n<li>envia <code>message.Body</code></li>\n</ol>\n<p><a href="https://x/pr/1">PR</a></p>';
+  assert.deepStrictEqual(findForbiddenMarkup(html), []);
+  assert.deepStrictEqual(findForbiddenMarkup('```\nSELECT 1\n```').map((f) => f.name), ['markdown code fence']);
+  assert.deepStrictEqual(findForbiddenMarkup('linha um\nlinha dois'), []);
+});
+
+test('findForbiddenMarkup: plain-text fields skip every markdown rule', () => {
+  assert.deepStrictEqual(findForbiddenMarkup('1. a\n\n`x` [l](u)', { html: false }), []);
 });
 
 test('findForbiddenMarkup: clean HTML passes', () => {
