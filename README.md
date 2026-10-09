@@ -715,7 +715,8 @@ node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a fie
 > (`assertRenderableFieldValue`), not in the CLI, so a one-off script calling `setField` /
 > `createWorkItem` directly is covered too — a guard that only exists one layer above the API is
 > a guard that scripts skip. It rejects inline `style=`, `<table>`, raw Markdown
-> headings/bold/bullets, code fences and emoji, and each rejection names a remedy. Single-line
+> headings/bold/bullets/numbered lists/inline code/links, code fences, plain-text paragraphs with
+> no tag at all (the form joins the lines) and emoji, and each rejection names a remedy. Single-line
 > values are never inspected. Override with `--force` (CLI) or `{ force: true }` (lib) once you
 > have decided the body is right as-is.
 
