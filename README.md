@@ -988,6 +988,23 @@ automatically. Works across projects in the same org.
 
 ---
 
+#### Link two work items
+
+```bash
+node index.js wi add-link <wi-url|id> <target-url|id>                    # dry-run: Related
+node index.js wi add-link 68619 67781 --yes                               # Related (default)
+node index.js wi add-link 68619 67484 --type parent --yes                 # also child, predecessor, successor, duplicate, duplicate-of
+node index.js wi add-link 68619 67781 --comment "twin item" --yes         # comment shown on the link
+```
+
+Adds a work item → work item relation. `wi create --parent` covers only the parent at creation
+time; this covers every link type afterwards. **Dry-run unless `--yes`.** Idempotent: an
+existing link of the same type to the same target is reported and nothing is written. Refuses a
+self link and a second parent (a work item has only one). Ids are org-level, so a bare id works
+across projects; a URL takes the org from the URL.
+
+---
+
 #### Create a work item of any type
 
 ```bash
