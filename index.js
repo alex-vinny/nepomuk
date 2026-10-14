@@ -23,6 +23,7 @@
  *   wi delete-comment <wi-url> <commentId>   Delete a work item comment (get id via `wi comments --ids`)
  *   wi set-state <wi-url> <state>  Change a work item's state (System.State)
  *   wi link-pr  <wi-url> <pr-url>  Link an existing pull request to a work item
+ *   wi add-link <wi> <target> [--type related|parent|child|…] [--yes]  Link two work items (dry-run unless --yes)
  *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>]
  *   wi attachments <wi-url>        List attachments
  *   wi attach   <wi-url> <file>    Attach a local file (previews unless --yes)
@@ -43,6 +44,7 @@ const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring 
 const { request, validatePat } = require('./lib/api');
 const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
+const relations = require('./lib/relations');
 const fmt = require('./lib/format');
 const build = require('./lib/build');
 // Suffixed: `repo` and `iteration` are already local variable names in several
@@ -1311,6 +1313,48 @@ async function explainStateRejection({ config, p, state, error, flags }) {
   process.exitCode = 1;
 }
 
+/** Work item id from a work item URL or a bare id; the org comes from the URL when there is one. */
+function workItemRef(raw, config, flags) {
+  if (!raw) die('Missing work item URL or id.');
+  const parsed = parseUrl(raw);
+  if (parsed && parsed.type === 'workitem') return { org: parsed.org, id: parsed.id };
+  const m = /^#?(\d+)$/.exec(String(raw).trim());
+  if (!m) die(`Cannot parse work item URL or id: ${raw}`);
+  return { org: (flags.org && flags.org !== true) ? flags.org : config.org, id: Number(m[1]) };
+}
+
+/**
+ * `wi add-link` — link two work items (Related by default; also parent, child,
+ * predecessor, successor, duplicate, duplicate-of). Idempotent: an existing link of the
+ * same type to the same target is reported and left alone. Dry-run unless --yes.
+ */
+async function cmdWiAddLink(rawFrom, rawTo, flags, config) {
+  const from = workItemRef(rawFrom, config, flags);
+  const to = workItemRef(rawTo, config, flags);
+  const type = (flags.type && flags.type !== true) ? flags.type : 'related';
+  const comment = (flags.comment && flags.comment !== true) ? flags.comment : undefined;
+
+  let result;
+  try {
+    result = await relations.addLink({
+      config, org: from.org, id: from.id, targetId: to.id, type, comment, dryRun: !flags.yes,
+    });
+  } catch (e) {
+    die(e.message);
+  }
+
+  if (result.status === 'exists') {
+    console.log(`#${from.id} already has a ${type} link to #${to.id} — nothing to do.`);
+    return;
+  }
+  if (result.status === 'planned') {
+    console.log('DRY RUN — nothing was written. Re-run with --yes to link.\n');
+    console.log(`  #${from.id} --${type} (${result.rel})--> #${to.id}${comment ? `  comment: ${comment}` : ''}`);
+    return;
+  }
+  console.log(`Linked #${from.id} --${type}--> #${to.id}.`);
+}
+
 async function cmdWiLinkPr(rawWiUrl, rawPrUrl, config, flags) {
   const w = needWorkItemUrlOrId(rawWiUrl, config, flags);
   const pp = needPrUrlOrId(rawPrUrl, config, flags);
@@ -2186,6 +2230,8 @@ Usage:
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
   azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"
   azure-connector wi link-pr     <wi-url> <pr-url>           # link an existing PR to the work item
+  azure-connector wi add-link    <wi-url|id> <target-url|id> [--type related|parent|child|predecessor|successor|duplicate|duplicate-of] [--comment "<t>"] [--yes]
+                                 # link two work items (default: related); skips an existing identical link; dry-run unless --yes
   azure-connector wi create      --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>] [--from-markdown] [--activity <name>]
                                  [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--parent <id>] [--yes]
                                  # creates ANY type (Product Backlog Item, Bug, Feature…); dry-run unless --yes
@@ -2356,6 +2402,7 @@ async function main() {
     if (sub === 'delete-comment') return cmdWiDeleteComment(arg1, arg2, config, flags);
     if (sub === 'set-state')   return cmdWiSetState(arg1, arg2, config, flags);
     if (sub === 'link-pr')     return cmdWiLinkPr(arg1, arg2, config, flags);
+    if (sub === 'add-link')    return cmdWiAddLink(arg1, arg2, flags, config);
     if (sub === 'create') return cmdWiCreate(flags, config);
     if (sub === 'create-task') return cmdWiCreateTask(arg1, arg2, flags, config);
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
