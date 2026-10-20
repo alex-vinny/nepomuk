@@ -190,6 +190,7 @@ effect the moment it is invoked.**
 | `pr comment --batch` | **yes** | `--dry-run`; all-or-nothing validation |
 | `pr reply`, `pr edit-comment`, `pr set-desc` | **yes** | none |
 | `pr abandon`, `pr delete-thread`, `pr close-thread` | **yes** | none |
+| `pr complete` | **yes** | **requires `--yes`**; previews otherwise. Refuses an inactive/draft/conflicting PR, pending policies without `--bypass`/`--auto`, and `--bypass` over a negative vote without `--force` |
 | `wi get|search|fields|field|layout|comments|updates|relations|missing|link` | no | — |
 | `wi set-field` | **yes** | `--dry-run`, `--verify`, and the always-on render guard |
 | `wi set-state` | **yes** | `--dry-run` + always-on rule preflight |
@@ -409,6 +410,7 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1) | Edits in place. **Writes, no dry-run.** |
 | `pr set-desc <url\|id> ["<text>"]` | `--body-file`, `--title` | Replaces description and/or renames. Use it to resync a description after later commits change the implementation. Same 4000-character cap. **Writes, no dry-run.** |
 | `pr abandon <url\|id>` | `--project`, `--repo` | Soft close. Branches remain. **Writes, no dry-run.** |
+| `pr complete <url\|id>` | `--strategy noFastForward\|squash\|rebase\|rebaseMerge`, `--delete-source-branch`, `--transition-work-items`, `--message-file`, `--bypass "<reason>"`, `--auto`, `--expect-head`, `--force`, `--yes` | Merges the PR, pinned to the previewed head. Without `--yes` prints votes, blocking policies not approved and the options. `--bypass` needs the branch permission; `--auto` arms auto-complete instead. Work items are **not** transitioned unless asked. **Writes only with `--yes`.** |
 | `pr delete-thread <url\|id> <threadId>` | `--comment <n>` (default 1) | Deletes the comment, then closes the thread. A failed delete is a warning; the close still runs. **Writes, no dry-run.** |
 | `pr close-thread <url\|id> <threadId>` | — | Marks the thread closed. **Writes, no dry-run.** |
 | `pr link <url\|id>` | `--wi <id>`, `--no-wi` | Prints the canonical reference line, with the **project resolved from the PR's own repository object** rather than assumed. Read-only. |
