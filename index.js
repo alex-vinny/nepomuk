@@ -131,6 +131,7 @@ const KNOWN_FLAGS = new Set([
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
   'against', 'batch', 'verify', 'no-strict-flags',
+  'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
 ]);
 
 /**
@@ -492,6 +493,111 @@ async function cmdPrAbandon(rawUrl, config, flags = {}) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   await pr.abandonPullRequest({ config, ...p });
   console.log(`PR #${p.prId} abandoned. (Branches remain — delete them separately if needed.)`);
+}
+
+/**
+ * `pr complete` — merge the PR now, with an optional policy bypass, or arm auto-complete.
+ *
+ * Without --yes it prints the plan (votes, pending policies, the options it would send)
+ * and exits. The completion is pinned to the head shown in that plan, so a push between
+ * the preview and the write makes Azure refuse it instead of merging unseen code.
+ */
+async function cmdPrComplete(rawUrl, flags, config) {
+  const strategy = flags.strategy === undefined ? 'noFastForward' : flags.strategy;
+  if (!pr.MERGE_STRATEGIES.includes(strategy)) {
+    die(`--strategy must be one of: ${pr.MERGE_STRATEGIES.join(', ')}.`);
+  }
+  if (flags.bypass === true || (typeof flags.bypass === 'string' && !flags.bypass.trim())) {
+    die('--bypass needs a reason, e.g. --bypass "Approved before the last push, which only merged the target branch". '
+      + 'Azure records it on the PR.');
+  }
+  const bypassReason = typeof flags.bypass === 'string' ? flags.bypass.trim() : null;
+  const auto = !!flags.auto;
+  if (auto && bypassReason) die('--auto and --bypass do not mix: auto-complete waits for the policies, bypass skips them.');
+
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const data = await pr.getPullRequest({ config, ...p });
+  if (data.status !== 'active') die(`PR #${p.prId} is "${data.status}", not active — nothing to complete.`);
+  const workItemIds = (await pr.getPullRequestWorkItems({ config, ...p })).map((w) => w.id);
+  const projectId = data.repository && data.repository.project && data.repository.project.id;
+  const pending = projectId
+    ? pr.pendingPolicies(await pr.getPolicyEvaluations({ config, ...p, projectId, prId: p.prId }))
+    : null;
+
+  let message = pr.defaultMergeMessage(data, workItemIds);
+  if (flags['message-file']) {
+    try { message = require('fs').readFileSync(flags['message-file'], 'utf8').trim(); }
+    catch (e) { die(`Could not read --message-file "${flags['message-file']}": ${e.message}`); }
+    if (!message) die(`--message-file "${flags['message-file']}" is empty.`);
+  }
+
+  const head = data.lastMergeSourceCommit && data.lastMergeSourceCommit.commitId;
+  const branch = (r) => String(r || '').replace(/^refs\/heads\//, '');
+  console.log(`PR #${p.prId}: ${data.title}`);
+  console.log(`  ${branch(data.sourceRefName)} → ${branch(data.targetRefName)}`);
+  console.log(`  head ${head ? head.slice(0, 10) : '(unknown)'} · status ${data.status} · merge ${data.mergeStatus}`);
+  console.log('  votes:');
+  for (const r of data.reviewers || []) {
+    console.log(`    ${String(r.vote).padStart(3)} ${pr.voteLabel(r.vote)}${r.isRequired ? ' (required)' : ''} — ${r.displayName}`);
+  }
+  if (pending == null) console.log('  policies: (could not resolve the project id; not checked)');
+  else if (!pending.length) console.log('  policies: all blocking policies approved');
+  else {
+    console.log('  policies not approved yet:');
+    for (const x of pending) console.log(`    ${x.status.padEnd(9)} ${x.type}${x.name ? ` — ${x.name}` : ''} (config ${x.id})`);
+  }
+  console.log(`  ${auto ? 'auto-complete' : 'complete now'} · ${strategy} · delete source branch: ${flags['delete-source-branch'] ? 'yes' : 'no'}`
+    + ` · transition work items: ${flags['transition-work-items'] ? 'yes' : 'no'}`);
+  if (bypassReason) console.log(`  BYPASS policies — reason: ${bypassReason}`);
+  const firstLine = message.split(/\r?\n/)[0];
+  console.log(`  merge message: ${firstLine}${message.length > firstLine.length ? ` (+${message.length - firstLine.length} chars)` : ''}`);
+
+  const blockers = pr.completionBlockers(data, {
+    expectHead: flags['expect-head'], auto, bypass: !!bypassReason, force: !!flags.force,
+  });
+  if (!auto && !bypassReason && pending && pending.length) {
+    blockers.push(`${pending.length} blocking polic${pending.length === 1 ? 'y is' : 'ies are'} not approved. `
+      + 'Wait for them, arm auto-complete with --auto, or skip them with --bypass "<reason>" if you are allowed to.');
+  }
+  if (blockers.length) die(`Cannot complete PR #${p.prId}:\n  - ${blockers.join('\n  - ')}`);
+
+  if (!flags.yes) {
+    console.log('\nDRY RUN — nothing was written. Re-run with --yes to ' + (auto ? 'arm auto-complete.' : 'complete.'));
+    return;
+  }
+
+  const autoCompleteUserId = auto ? (await validatePat(config)).id : null;
+  const body = pr.buildCompletionBody({
+    prData: data,
+    strategy,
+    deleteSourceBranch: !!flags['delete-source-branch'],
+    transitionWorkItems: !!flags['transition-work-items'],
+    message,
+    bypassReason,
+    autoCompleteUserId,
+  });
+  await pr.completePullRequest({ config, ...p, body });
+
+  if (auto) {
+    const after = await pr.getPullRequest({ config, ...p });
+    if (!after.autoCompleteSetBy) die(`Azure accepted the request but PR #${p.prId} shows no auto-complete. Check it in the web UI.`);
+    console.log(`\nAuto-complete set on PR #${p.prId} by ${after.autoCompleteSetBy.displayName}; it merges once the policies pass.`);
+    return;
+  }
+
+  // Azure finishes the merge asynchronously: the PATCH answers before the target moves.
+  let after = null;
+  for (let i = 0; i < 15; i++) {
+    after = await pr.getPullRequest({ config, ...p });
+    if (after.status === 'completed') break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (after.status !== 'completed') {
+    die(`PR #${p.prId} is still "${after.status}" (merge ${after.mergeStatus}) 30 s after the request. `
+      + `Run "pr get ${p.prId}" in a moment; if it stays active, Azure refused the completion.`);
+  }
+  const mergeCommit = after.lastMergeCommit && after.lastMergeCommit.commitId;
+  console.log(`\nPR #${p.prId} completed${mergeCommit ? ` — merge commit ${mergeCommit.slice(0, 10)}` : ''}.`);
 }
 
 // Thin network wrapper around pr.threadsAnchoredAt — kept separate so the matching
@@ -2212,6 +2318,9 @@ Usage:
   azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>]  # Markdown file; inline text is not supported
   azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"]   # update PR description/title in place
   azure-connector pr abandon       <pr-url>                                          # set PR status to abandoned (branches remain)
+  azure-connector pr complete      <pr-url|pr-id> [--strategy noFastForward|squash|rebase|rebaseMerge] [--delete-source-branch] [--transition-work-items]
+                                   [--message-file <path>] [--bypass "<reason>" | --auto] [--expect-head <sha>] [--yes]
+                                   # previews votes + pending policies without --yes; --bypass skips policies (needs permission), --auto arms auto-complete
   azure-connector pr delete-thread <pr-url> <threadId> [--comment <n>]
   azure-connector pr close-thread  <pr-url> <threadId>
   azure-connector pr timeline      <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas
@@ -2382,6 +2491,7 @@ async function main() {
     if (sub === 'edit-comment')  return cmdPrEditComment(arg1, arg2, arg3, flags, config);
     if (sub === 'set-desc')      return cmdPrSetDesc(arg1, arg2, flags, config);
     if (sub === 'abandon')       return cmdPrAbandon(arg1, config, flags);
+    if (sub === 'complete')      return cmdPrComplete(arg1, flags, config);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
     if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config, flags);
     if (sub === 'timeline')      return cmdPrTimeline(arg1, flags, config);

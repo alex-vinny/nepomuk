@@ -492,6 +492,46 @@ if needed. Handy for tearing down throwaway PRs created while testing a review f
 
 ---
 
+#### Complete a pull request
+
+```bash
+# Preview: votes, blocking policies not yet approved, and the options that would be sent
+node index.js pr complete <pr-url>
+
+# Merge now
+node index.js pr complete <pr-url> --delete-source-branch --yes
+
+# Merge now over pending policies (needs the "bypass policies" permission on the branch)
+node index.js pr complete <pr-url> --bypass "Approved before the last push, which only merged the target" --yes
+
+# Let Azure merge it once the policies pass
+node index.js pr complete <pr-url> --auto --yes
+```
+
+Without `--yes` nothing is written. The command refuses when the PR is not active, is a draft,
+does not merge cleanly (`--auto` allows that one: it waits for the fixing push), or has blocking
+policies still pending and neither `--bypass` nor `--auto` was given. `--bypass` also refuses
+while a reviewer has a negative vote ("waiting for author" or rejected), because the bypass would
+merge over it; `--force` accepts that.
+
+The completion is pinned to the head shown in the preview, so a push in between makes Azure
+refuse it. `--expect-head <sha>` checks the head before anything is sent.
+
+| Flag | Default | |
+|---|---|---|
+| `--strategy` | `noFastForward` | or `squash`, `rebase`, `rebaseMerge` |
+| `--delete-source-branch` | off | |
+| `--transition-work-items` | off | the web UI turns it on; here it is opt-in |
+| `--message-file <path>` | `Merged PR <id>: <title>`, the description and `Related work items: #…` | same shape as the web UI |
+| `--bypass "<reason>"` | — | the reason is recorded on the PR |
+| `--auto` | — | arms auto-complete as the PAT's user; not combinable with `--bypass` |
+
+A policy that asks for a vote on the last iteration goes back to pending after any push, even a
+merge of the target branch, while the old votes still show. The preview lists those policies so it
+is clear why a PR with only approvals cannot complete.
+
+---
+
 #### Show changed files / diff
 
 ```bash
