@@ -1126,8 +1126,8 @@ node index.js wi attach 66360 ./report.pdf --comment "Analysis of 2026-09-17"  -
 node index.js wi attach 66360 ./out/final.pdf --name "Royalties-66360.pdf" --yes
 ```
 
-An upload is a write everyone watching the item sees, and removing the link does not
-remove the blob, so the command **previews unless `--yes`** — the preview names the
+An upload is a write everyone watching the item sees, and removing the link (`wi detach`)
+does not remove the blob, so the command **previews unless `--yes`** — the preview names the
 target item, the resolved project, the byte count and the attachments already there.
 
 Two behaviours worth knowing:
@@ -1159,6 +1159,43 @@ accepted-and-ignored it would silently fetch a different file.
 | `--comment "<text>"` | Attachment comment, shown next to the name in `wi attachments`. |
 | `--allow-duplicate` | Permit a name that is already attached. |
 | `--json` | Print `{ id, url, name, relations }` instead of the human line. |
+
+---
+
+#### Remove an attachment
+
+```bash
+# Preview only — nothing is removed
+node index.js wi detach <wi-url|id> "report.html"
+
+# Remove it, by exact name or by the 1-based index of `wi attachments`
+node index.js wi detach 66360 "report.html" --yes
+node index.js wi detach 66360 3 --yes
+```
+
+The usual reason is replacing a stale file: `wi detach` the old one, then `wi attach` the
+new one under the same name. The command **previews unless `--yes`**; the preview names
+the attachment, its comment and url, and the revision the item was read at.
+
+What it does and does not do:
+
+- **Only the link goes.** The file stays in the item's history and is still served at its
+  url. Removing an attachment does not retract something that should never have been
+  published.
+- **The selector is required**, even when the item has one attachment, and two
+  attachments with the same name are refused by name — pass the index instead.
+- **The removal is pinned to the revision it was read at.** Azure removes relations by
+  position, and positions shift when anyone adds or removes a link, so the PATCH carries a
+  `test` of `/rev`. If the item changed in between, Azure rejects the whole patch and
+  nothing is removed; read it again and repeat.
+- **A picture shown in a field is reported.** When a field's HTML points at the
+  attachment (an image pasted into the description, say), the command warns on stderr:
+  that picture may stop showing once the link is gone. Comments are not checked.
+
+| Flag | Effect |
+|---|---|
+| `--yes` | Actually remove. Without it the command previews and exits 0. |
+| `--json` | Print the preview fields with the new `rev` and `attachmentsAfter`. |
 
 ---
 
@@ -1511,6 +1548,7 @@ All calls use API version `7.1`. Key endpoints used:
 | Update work item | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch body) |
 | Upload attachment | POST | `/_apis/wit/attachments?fileName=...` (raw bytes, `application/octet-stream`) |
 | Link attachment | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch, `AttachedFile` relation) |
+| Remove attachment | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch: `test /rev`, then `remove /relations/{n}`) |
 | Download attachment | GET | attachment URL from work item relations |
 | Work item change history | GET | `/_apis/wit/workItems/{id}/updates` (paginated `$top`/`$skip`) |
 | Iteration tree | GET | `/_apis/wit/classificationnodes/iterations?$depth=N` |

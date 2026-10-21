@@ -26,6 +26,7 @@
  *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>]
  *   wi attachments <wi-url>        List attachments
  *   wi attach   <wi-url> <file>    Attach a local file (previews unless --yes)
+ *   wi detach   <wi-url> <n|name>  Remove an attachment's link (previews unless --yes)
  *   wi download <wi-url>  <n|name>  Download attachment (by index or name)
  *   wiki list --project <project> [--org <org>]  List wikis in a project
  *   wiki pages --project <project> --wiki <wikiIdOrName> [--org <org>]  List wiki pages
@@ -1596,6 +1597,67 @@ async function cmdWiAttach(rawUrl, filePath, flags, config) {
   }
 }
 
+// Remove an attachment from a work item. Previews unless --yes, like wi attach: the
+// removal is visible to everyone on the item, and the selector is easy to get wrong.
+async function cmdWiDetach(rawUrl, selector, flags, config) {
+  // Same trap as wi download: --name is a global flag, so `wi detach <id> --name x`
+  // would pass the strict-flag check with the selector left undefined.
+  if (flags.name !== undefined) {
+    die('wi detach takes the attachment as a positional, not --name:\n'
+      + `  azure-connector wi detach ${rawUrl || '<wi-url|id>'} "${flags.name !== true ? flags.name : '<name>'}"`);
+  }
+  const p = needWorkItemUrlOrId(rawUrl, config, flags);
+  const item = await wi.getWorkItem({ config, ...p });
+  const relations = item.relations || [];
+
+  const found = wi.findAttachmentRelation({ relations, selector });
+  if (!found.ok) {
+    if (found.reason === 'ambiguous' || found.reason === 'out-of-range' || found.reason === 'no-selector') {
+      fmt.printAttachments(wi.listAttachmentsFromRelations(relations));
+    }
+    die(found.message);
+  }
+
+  const referencedBy = wi.fieldsReferencingAttachment({ fields: item.fields, url: found.attachment.url });
+  const total = relations.filter((r) => r.rel === 'AttachedFile').length;
+  const preview = {
+    workItem: p.id,
+    rev: item.rev,
+    attachment: found.index,
+    name: found.attachment.name,
+    comment: found.attachment.comment || null,
+    url: found.attachment.url,
+    referencedByFields: referencedBy,
+    attachmentsAfter: total - 1,
+  };
+
+  // With --yes there is no preview to read, so the warning has to reach stderr.
+  if (referencedBy.length) {
+    console.error(`warning: ${referencedBy.join(', ')} point(s) at this attachment; `
+      + 'what is shown there may stop showing once the link is gone.');
+  }
+
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing removed. Re-run with --yes to detach.\n');
+    console.log(JSON.stringify(preview, null, 2));
+    return;
+  }
+
+  // Org-level endpoint: the item is addressed by id, which is org-unique, so a stale
+  // --project/config default cannot point the write at the wrong project.
+  const result = await wi.detachAttachment({
+    config, org: p.org, id: p.id, rev: item.rev, relationIndex: found.relationIndex,
+  });
+
+  if (flags.json) {
+    console.log(JSON.stringify({ ...preview, rev: result.rev, attachmentsAfter: result.remaining }, null, 2));
+    return;
+  }
+  const left = result.remaining === null ? '' : ` ${result.remaining} attachment(s) left.`;
+  console.log(`Removed "${found.attachment.name}" from #${p.id} (rev ${result.rev}).${left}`);
+  console.log('The file itself stays in the item\'s history.');
+}
+
 async function cmdWiDownload(rawUrl, selector, flags, config) {
   // `name` is a valid flag globally (wi attach takes it), so the strict-flag check no
   // longer catches `wi download <id> --name "x.pdf"` — and that spelling is the obvious
@@ -2193,6 +2255,8 @@ Usage:
    azure-connector wi attachments <wi-url>
    azure-connector wi attach      <wi-url> <file> [--name <n>] [--comment "<text>"] [--allow-duplicate] [--yes] [--json]
                                    # upload a local file and link it; DRY RUN unless --yes. --name renames it on the item; a name already on the item is refused (Azure would keep both)
+   azure-connector wi detach      <wi-url> <index|name> [--yes] [--json]
+                                   # remove an attachment from the item; DRY RUN unless --yes. The file stays in the item's history
    azure-connector wi download    <wi-url> [<index|name>] [--out <dir>]
   azure-connector wi updates     <wi-url> [--field <ref>] [--all-fields] [--time-in-state] [--entered "<State>"] [--json]
                                    # how the item MOVED (default field: System.State). The work item itself only carries its current state.
@@ -2361,6 +2425,7 @@ async function main() {
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
     if (sub === 'attach')      return cmdWiAttach(arg1, arg2, flags, config);
+    if (sub === 'detach')      return cmdWiDetach(arg1, arg2, flags, config);
     if (sub === 'download')    return cmdWiDownload(arg1, arg2, flags, config);
     if (sub === 'updates' || sub === 'history') return cmdWiUpdates(arg1, flags, config);
     if (sub === 'relations') return cmdWiRelations(arg1, flags, config);
