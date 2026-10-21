@@ -199,12 +199,13 @@ effect the moment it is invoked.**
 | `wi set-estimate`, `wi create-task`, `wi link-pr` | **yes** | none |
 | `wi create` | **yes** | **requires `--yes`**; previews otherwise, and the render guard runs on the preview too |
 | `wi attach` | **yes** | **requires `--yes`**; previews otherwise |
+| `wi detach` | **yes** | **requires `--yes`**; previews otherwise, and the PATCH is pinned to the revision it was read at |
 | `wiki list|pages|get` | no | — |
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
 
-`build rerun`, `wi create` and `wi attach` are the only commands that refuse to act without
-`--yes`. Do not assume that convention elsewhere.
+`build rerun`, `wi create`, `wi attach` and `wi detach` are the only commands that refuse to
+act without `--yes`. Do not assume that convention elsewhere.
 
 ---
 
@@ -482,6 +483,7 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi link <url\|id>` | `--no-type` | Prints the canonical reference line, with the project taken from the **root segment of the Area path** — which is always the project name. Warns on stderr when that disagrees with a passed `--project`. Read-only. |
 | `wi attachments <url\|id>` | — | Index, name, comment, download URL. |
 | `wi attach <url\|id> <file>` | `--yes`, `--name <n>`, `--comment "<t>"`, `--allow-duplicate`, `--json` | Uploads the bytes, then links them as an `AttachedFile` relation. **Previews unless `--yes`.** The project is read from the item's Area path, not from `--project`/config — see below. **Writes.** |
+| `wi detach <url\|id> <index\|name>` | `--yes`, `--json` | Removes one `AttachedFile` relation, chosen by the 1-based index of `wi attachments` or an exact name. **Previews unless `--yes`.** The selector is required; a name held by two attachments is refused. The file stays in the item's history and at its url — see below. **Writes.** |
 | `wi download <url\|id> [<index\|name>]` | `--out <dir>` | 1-based index or exact file name. The selector may be omitted when there is exactly one attachment. Writes a local file. |
 | `wi updates <url\|id>` (alias `history`) | `--field <ref>` (default `System.State`), `--all-fields`, `--time-in-state`, `--entered "<v>"`, `--ids <a,b,c\|@file>`, `--project`, `--json` | See below. |
 | `wi relations <url\|id>` | `--type <kinds>`, `--ids <a,b,c\|@file>`, `--project`, `--no-resolve`, `--json` | See below. |
@@ -525,6 +527,37 @@ Transport note: `lib/api.js` `request()` sends a **Buffer body as raw bytes** an
 else as JSON. That branch is load-bearing — `JSON.stringify(buffer)` produces
 `{"type":"Buffer","data":[...]}`, which Azure accepts with a `200` and stores as a
 corrupt attachment. `test/connector.test.js` pins it against a loopback server.
+
+#### `wi detach` — taking a file off the item
+
+```bash
+wi detach 66360 "report.html"          # preview, exit 0
+wi detach 66360 3 --yes                # by the index wi attachments prints
+```
+
+One PATCH, two operations: `test /rev` with the revision the item was read at, then
+`remove /relations/{n}`. Relations are removed **by position**, and the position is in
+`item.relations` — not the attachment index, which differs as soon as the item has any
+other link. A link added or removed between the read and the write shifts the array; the
+`test` makes Azure reject the whole patch instead of removing a neighbour. The same test
+makes a retried PATCH safe: the replay fails rather than removing the next relation down.
+A rejected patch removes nothing, and the error says so.
+
+What it decides for you:
+
+- **The selector is required**, even when the item has exactly one attachment. `wi
+  download` defaults to a lone attachment; a removal names its target.
+- **A name held by two attachments is refused** (reachable through `wi attach
+  --allow-duplicate`), with the indexes to pick from.
+- **`--name` is refused**, for the reason `wi download` refuses it.
+- **A field that shows the attachment is reported** on stderr — an `<img>` pasted into
+  the description, say — because the picture there may stop showing. Comments are not
+  scanned.
+- **The write goes to the org-level endpoint**, so a stale `--project`/config default
+  cannot address another project.
+
+Only the link goes. The file stays in the item's history and is still served at its url
+(verified 2026-10-21), so this is not a way to retract something published by mistake.
 
 #### `wi updates` — how an item moved
 
@@ -645,8 +678,8 @@ same numbers.
 ## 11. Operating rules for an autonomous caller
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
-   no `--dry-run`. Only `build rerun`, `wi create` and `wi attach` refuse to act without
-   confirmation.
+   no `--dry-run`. Only `build rerun`, `wi create`, `wi attach` and `wi detach` refuse to
+   act without confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.
 3. **Treat exit 2 as a question, not a failure.** Re-issue with `--field <ref>` or
@@ -681,8 +714,8 @@ same numbers.
 npm test      # or: node --test
 ```
 
-184 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
-two kinds. The transport and comment tests drive the lib against a throwaway `127.0.0.1`
+195 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+two kinds. The transport, comment and `wi detach` tests drive the lib against a throwaway `127.0.0.1`
 server on an ephemeral port — the only way to assert that a binary body leaves as bytes,
 and that an error Azure returns *after* storing a comment is reported as stored. The
 `wi create` tests spawn the CLI in dry-run with a non-existent config file and a closed
@@ -690,7 +723,7 @@ base url, so they can never read a real config or reach a real org.
 
 | File | Covers |
 |---|---|
-| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
+| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), the `wi detach` selection and patch (`findAttachmentRelation`, `fieldsReferencingAttachment`, `detachOps`, and `detachAttachment` against a loopback server), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 

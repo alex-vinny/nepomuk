@@ -15,6 +15,7 @@ const { normalizeBranchRef, buildRerunPayload, summarizeBuild } = require('../li
 const {
   markdownToHtml, markdownToFieldHtml, assertRenderableFieldValue,
   attachmentUploadUrl, attachmentRelation, checkAttachment, attachFile, ATTACHMENT_MAX_BYTES,
+  listAttachmentsFromRelations, findAttachmentRelation, fieldsReferencingAttachment, detachOps, detachAttachment,
   commentFingerprint, assertCommentLength, COMMENT_MAX_CHARS, embedLocalImages, attachmentEmbedUrl,
   addComment, editComment,
 } = require('../lib/workitem');
@@ -654,6 +655,121 @@ test('checkAttachment: a name already on the item is refused, because wi downloa
 
 test('checkAttachment: no file name is refused before the bytes are spent', () => {
   assert.strictEqual(checkAttachment({ fileName: '', size: 10 }).reason, 'no-name');
+});
+
+// ── wi detach ────────────────────────────────────────────────────────────────
+
+const BLOB_A = 'https://dev.azure.com/acme/_apis/wit/attachments/a87a1407-7bb9-4784-9833-9135ddb42033';
+const BLOB_B = 'https://dev.azure.com/acme/_apis/wit/attachments/F7828C37-7EEE-42A8-A6E7-433914DC5FBB';
+const RELATIONS = [
+  { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/acme/_apis/wit/workItems/2' },
+  { rel: 'AttachedFile', url: BLOB_A, attributes: { name: 'shot.png', comment: 'support' } },
+  { rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/x%2Fy%2F1' },
+  { rel: 'AttachedFile', url: BLOB_B, attributes: { name: 'report.html' } },
+];
+
+test('findAttachmentRelation: the PATCH index is the position in relations, not among attachments', () => {
+  const r = findAttachmentRelation({ relations: RELATIONS, selector: '2' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.index, 2);
+  assert.strictEqual(r.relationIndex, 3, 'removing /relations/2 would drop the pull request link');
+  assert.strictEqual(r.attachment.name, 'report.html');
+});
+
+test('findAttachmentRelation: by exact name, numbered the way wi attachments numbers it', () => {
+  const r = findAttachmentRelation({ relations: RELATIONS, selector: 'shot.png' });
+  assert.deepStrictEqual([r.ok, r.index, r.relationIndex, r.attachment.comment], [true, 1, 1, 'support']);
+  assert.deepStrictEqual(listAttachmentsFromRelations(RELATIONS).map((a) => a.name), ['shot.png', 'report.html']);
+});
+
+test('findAttachmentRelation: a removal always names its target, even with a single attachment', () => {
+  const single = [RELATIONS[1]];
+  assert.strictEqual(findAttachmentRelation({ relations: single }).reason, 'no-selector');
+  assert.strictEqual(findAttachmentRelation({ relations: single, selector: true }).reason, 'no-selector');
+});
+
+test('findAttachmentRelation: two copies of one name are refused — removing the first would be a guess', () => {
+  const dup = [...RELATIONS, { rel: 'AttachedFile', url: BLOB_A, attributes: { name: 'report.html' } }];
+  const r = findAttachmentRelation({ relations: dup, selector: 'report.html' });
+  assert.strictEqual(r.reason, 'ambiguous');
+  assert.match(r.message, /indexes 2, 3/);
+  assert.strictEqual(findAttachmentRelation({ relations: dup, selector: '3' }).relationIndex, 4, 'the index still works');
+});
+
+test('findAttachmentRelation: unknown name, index out of range, and no attachments at all', () => {
+  assert.strictEqual(findAttachmentRelation({ relations: RELATIONS, selector: 'nope.pdf' }).reason, 'not-found');
+  assert.strictEqual(findAttachmentRelation({ relations: RELATIONS, selector: '0' }).reason, 'out-of-range');
+  assert.strictEqual(findAttachmentRelation({ relations: RELATIONS, selector: '3' }).reason, 'out-of-range');
+  assert.strictEqual(findAttachmentRelation({ relations: [RELATIONS[0]], selector: '1' }).reason, 'none');
+});
+
+test('fieldsReferencingAttachment: finds a picture pasted into a field, whatever the guid case', () => {
+  const fields = {
+    'System.Title': 'Bug',
+    'Microsoft.VSTS.TCM.SystemInfo': '<img src="https://dev.azure.com/acme/P/_apis/wit/attachments/f7828c37-7eee-42a8-a6e7-433914dc5fbb?fileName=a.png">',
+    'System.Rev': 12,
+  };
+  assert.deepStrictEqual(fieldsReferencingAttachment({ fields, url: BLOB_B }), ['Microsoft.VSTS.TCM.SystemInfo']);
+  assert.deepStrictEqual(fieldsReferencingAttachment({ fields, url: BLOB_A }), []);
+  assert.deepStrictEqual(fieldsReferencingAttachment({ fields, url: 'https://x/not-an-attachment' }), []);
+});
+
+test('detachOps: the revision test comes first, so a shifted relations array fails instead of losing another link', () => {
+  assert.deepStrictEqual(detachOps({ rev: 37, relationIndex: 3 }), [
+    { op: 'test', path: '/rev', value: 37 },
+    { op: 'remove', path: '/relations/3' },
+  ]);
+  assert.throws(() => detachOps({ rev: undefined, relationIndex: 3 }), /revision/);
+  assert.throws(() => detachOps({ rev: 37, relationIndex: -1 }), /relation index/);
+});
+
+test('detachAttachment: one org-level json-patch PATCH, and the attachment count after it', async () => {
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen = { method: req.method, url: req.url, type: req.headers['content-type'], body: JSON.parse(Buffer.concat(chunks)) };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: 7, rev: 38, relations: [RELATIONS[0], RELATIONS[1], RELATIONS[2]] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const out = await detachAttachment({
+      config: { org: 'acme', baseUrl: `http://127.0.0.1:${server.address().port}`, pat: 'x' },
+      id: 7, rev: 37, relationIndex: 3,
+    });
+    assert.deepStrictEqual(out, { rev: 38, remaining: 1 });
+    assert.strictEqual(seen.method, 'PATCH');
+    assert.strictEqual(seen.type, 'application/json-patch+json');
+    assert.match(seen.url, /^\/acme\/_apis\/wit\/workItems\/7\?/);
+    assert.deepStrictEqual(seen.body, detachOps({ rev: 37, relationIndex: 3 }));
+  } finally {
+    server.close();
+  }
+});
+
+test('detachAttachment: a rejected patch says nothing was removed', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(412, { 'Content-Type': 'application/json' });
+      res.end('{"message":"TF401289: The current work item revision is 38"}');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    await assert.rejects(
+      () => detachAttachment({
+        config: { org: 'acme', baseUrl: `http://127.0.0.1:${server.address().port}`, pat: 'x' },
+        id: 7, rev: 37, relationIndex: 3,
+      }),
+      (err) => /Nothing was removed from #7/.test(err.message) && /HTTP 412/.test(err.message),
+    );
+  } finally {
+    server.close();
+  }
 });
 
 // ── api: a Buffer body goes out as bytes, not as JSON ────────────────────────
