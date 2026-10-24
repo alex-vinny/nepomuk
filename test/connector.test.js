@@ -349,6 +349,19 @@ test('markdownToHtml: a pipe inside inline code is not a cell separator', () => 
   assert.ok(!html.includes('<table'), 'prose with a pipe is not read as a table');
 });
 
+test('markdownToHtml: asterisks inside inline code stay literal', () => {
+  const html = markdownToFieldHtml('`**texto**` e `snake_case` ficam como estão.');
+  assert.ok(html.includes('<code>**texto**</code>'), 'no bold inside the code span');
+  assert.ok(!html.includes('<b>'), 'nothing bolded');
+});
+
+test('markdownToHtml: bold around inline code still works', () => {
+  const html = markdownToFieldHtml('**veja `a*b*c` aqui** e `x`');
+  assert.ok(html.includes('<b>veja <code>a*b*c</code> aqui</b>'));
+  assert.ok(html.includes('<code>x</code>'));
+  assert.ok(!html.includes('[[[ICODE'), 'no leftover placeholder marker');
+});
+
 test('markdownToHtml: prose containing a pipe is not read as a table', () => {
   const html = markdownToHtml('Rodar A | B para comparar.\n\nOutra linha.');
   assert.ok(!html.includes('<table'));
@@ -443,6 +456,18 @@ test('markdownToFieldHtml: a hard-wrapped line inside a nested item is still a c
 test('markdownToFieldHtml: a nested list of the other type becomes a sibling list under the same parent', () => {
   const html = markdownToFieldHtml('- pai\n  - x\n  1. y');
   assert.ok(html.includes('<li>pai<ul>\n<li>x</li>\n</ul>\n<ol>\n<li>y</li>\n</ol></li>'), html);
+});
+
+test('markdownToFieldHtml: a numbered list that continues after a heading keeps its first number', () => {
+  const html = markdownToFieldHtml('1. um\n2. dois\n\n**Mais**\n\n11. onze\n    - detalhe\n12. doze');
+  assert.ok(/^<ol>\n<li>um<\/li>/.test(html), 'a list starting at 1 carries no start attribute: ' + html);
+  assert.ok(html.includes('<ol start="11">\n<li>onze<ul>'), html);
+  assert.ok(!/<ul start=/.test(html), 'bullets never get a start');
+});
+
+test('markdownToFieldHtml: a nested numbered list keeps its own first number', () => {
+  const html = markdownToFieldHtml('- pai\n  3. tres\n  4. quatro');
+  assert.ok(html.includes('<li>pai<ol start="3">\n<li>tres</li>'), html);
 });
 
 test('markdownToHtml: nested list in a comment gets no <br/> between an item and its sub-list', () => {

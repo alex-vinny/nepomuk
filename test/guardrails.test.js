@@ -250,6 +250,12 @@ test('findForbiddenMarkup: the new markdown rules leave clean HTML alone', () =>
   assert.deepStrictEqual(findForbiddenMarkup('linha um\nlinha dois'), []);
 });
 
+test('findForbiddenMarkup: markdown inside a code span is an example, not markup', () => {
+  assert.deepStrictEqual(findForbiddenMarkup('<ul>\n<li><code>**texto**</code> fica como está.</li>\n</ul>'), []);
+  assert.deepStrictEqual(findForbiddenMarkup('<pre><code>- a\n1. b</code></pre>'), []);
+  assert.deepStrictEqual(findForbiddenMarkup('<p><code>x</code> e **cru**</p>').map((f) => f.name), ['raw markdown bold']);
+});
+
 test('findForbiddenMarkup: plain-text fields skip every markdown rule', () => {
   assert.deepStrictEqual(findForbiddenMarkup('1. a\n\n`x` [l](u)', { html: false }), []);
 });
