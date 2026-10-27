@@ -184,11 +184,12 @@ effect the moment it is invoked.**
 | `raw` | **depends on `<METHOD>`** | none — `raw POST/PATCH/PUT/DELETE` writes immediately |
 | `create-repo` | **yes** | none |
 | `sprints`, `repo list|get|refs` | no | — |
-| `pr get|list|diff|comments|timeline|link` | no | — |
+| `pr get|list|diff|comments|timeline|link|attachments` | no | — |
 | `pr create` | **yes** | none |
-| `pr comment` | **yes** | `--dry-run`; also `--expect-head`, duplicate detection, anchor validation |
-| `pr comment --batch` | **yes** | `--dry-run`; all-or-nothing validation |
-| `pr reply`, `pr edit-comment`, `pr set-desc` | **yes** | none |
+| `pr comment` | **yes** | `--dry-run`; also `--expect-head`, duplicate detection, anchor validation; a local image in the body is refused unless `--attach-images` |
+| `pr comment --batch` | **yes** | `--dry-run`; all-or-nothing validation; a local image is refused (no upload in a batch) |
+| `pr reply`, `pr edit-comment`, `pr set-desc` | **yes** | `--dry-run`; a local image in the body is refused unless `--attach-images` |
+| `pr attach` | **yes** | **requires `--yes`**; previews otherwise |
 | `pr abandon`, `pr delete-thread`, `pr close-thread` | **yes** | none |
 | `pr complete` | **yes** | **requires `--yes`**; previews otherwise. Refuses an inactive/draft/conflicting PR, pending policies without `--bypass`/`--auto`, and `--bypass` over a negative vote without `--force` |
 | `wi get|search|fields|field|layout|comments|updates|relations|missing|link` | no | — |
@@ -204,7 +205,7 @@ effect the moment it is invoked.**
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
 
-`build rerun`, `wi create` and `wi attach` are the only commands that refuse to act without
+`build rerun`, `wi create`, `wi attach` and `pr attach` are the only commands that refuse to act without
 `--yes`. Do not assume that convention elsewhere.
 
 ---
@@ -406,9 +407,11 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr diff <url\|id>` | `--project`, `--repo`, `--full` (alias `--content`), `--patch` (no-op) | Prints the changed-file list, then a unified diff per file. `--full` dumps each changed file's whole contents from the source branch instead. Line numbers in the diff are the right-hand ones `pr comment --line` expects. |
 | `pr comments <url\|id>` | `--project`, `--repo` | Lists active threads with author, date, file location and content. Source of `<threadId>`. |
 | `pr comment <url\|id>` | `--body-file` (**required**), `--file`, `--line`, `--dry-run`, `--expect-head <sha>`, `--allow-duplicate`, `--no-validate`, `--batch <manifest>` | See §8.3–8.5. Markdown body. `--line` is a right-hand file line number. **Writes.** |
-| `pr reply <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (parent, default 1) | Replies inside an existing thread. **Writes, no dry-run.** |
-| `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1) | Edits in place. **Writes, no dry-run.** |
-| `pr set-desc <url\|id> ["<text>"]` | `--body-file`, `--title` | Replaces description and/or renames. Use it to resync a description after later commits change the implementation. Same 4000-character cap. **Writes, no dry-run.** |
+| `pr reply <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (parent, default 1), `--attach-images`, `--dry-run` | Replies inside an existing thread. **Writes.** |
+| `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1), `--attach-images`, `--dry-run` | Edits in place. **Writes.** |
+| `pr set-desc <url\|id> ["<text>"]` | `--body-file`, `--title`, `--attach-images`, `--dry-run` | Replaces description and/or renames. Use it to resync a description after later commits change the implementation. Same 4000-character cap, counted **with** the image urls. **Writes.** |
+| `pr attachments <url\|id>` | `--project`, `--repo`, `--json` | Index, name, date, author name, url. The author e-mail Azure returns is not printed, not even in `--json`. |
+| `pr attach <url\|id> <file>` | `--name <n>`, `--yes`, `--json` | Uploads the file as a PR attachment and prints the url plus a ready `![name](url)` line. **Previews unless `--yes`.** See below. **Writes.** |
 | `pr abandon <url\|id>` | `--project`, `--repo` | Soft close. Branches remain. **Writes, no dry-run.** |
 | `pr complete <url\|id>` | `--strategy noFastForward\|squash\|rebase\|rebaseMerge`, `--delete-source-branch`, `--transition-work-items`, `--message-file`, `--bypass "<reason>"`, `--auto`, `--expect-head`, `--force`, `--yes` | Merges the PR, pinned to the previewed head. Without `--yes` prints votes, blocking policies not approved and the options. `--bypass` needs the branch permission; `--auto` arms auto-complete instead. Work items are **not** transitioned unless asked. **Writes only with `--yes`.** |
 | `pr delete-thread <url\|id> <threadId>` | `--comment <n>` (default 1) | Deletes the comment, then closes the thread. A failed delete is a warning; the close still runs. **Writes, no dry-run.** |
@@ -487,6 +490,44 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi download <url\|id> [<index\|name>]` | `--out <dir>` | 1-based index or exact file name. The selector may be omitted when there is exactly one attachment. Writes a local file. |
 | `wi updates <url\|id>` (alias `history`) | `--field <ref>` (default `System.State`), `--all-fields`, `--time-in-state`, `--entered "<v>"`, `--ids <a,b,c\|@file>`, `--project`, `--json` | See below. |
 | `wi relations <url\|id>` | `--type <kinds>`, `--ids <a,b,c\|@file>`, `--project`, `--no-resolve`, `--json` | See below. |
+
+#### `pr attach` and `--attach-images` — pictures in a PR
+
+A PR attachment is **addressed by its file name** (`…/pullRequests/{id}/attachments/{fileName}`):
+there is no blob id, and nothing collects an upload no comment uses. Each rule below
+follows from that.
+
+```bash
+pr attach <pr> ./shot.png                 # preview, exit 0
+pr attach <pr> ./shot.png --yes           # upload; prints url + ![shot.png](url)
+pr reply <pr> <thread> --body-file r.md --attach-images            # r.md has ![print](./shot.png)
+pr set-desc <pr> --body-file d.md --attach-images --dry-run        # shows the final text, uploads nothing
+```
+
+- **Same name, same bytes: reused; same name, other bytes: refused.** The SHA-1 of the file
+  is compared with the `contentHash` Azure lists. Re-running after a failure never uploads
+  a second copy, and a new picture can never replace one that existing comments show.
+  Whether Azure itself would reject or overwrite a taken name was not measured.
+- **The url is the GUID form Azure returns, and is used as is.** It is what the PR UI writes
+  when you paste a screenshot, and it renders. This is the **opposite** of `wi attach`,
+  whose GUID url a comment rejects: do not "fix" one by analogy with the other.
+- **Names are cleaned** (accents dropped, spaces and parentheses become `-`): either one
+  raw in the url ends the markdown link. The file's own name is cleaned quietly; an explicit
+  `--name` that would break a link is refused with the suggestion.
+- **Executables and scripts are refused** (`.exe`, `.ps1`, `.js`, …): anyone who reads the
+  repo can download a PR attachment. `--attach-images` takes only png, jpg, gif, webp, bmp.
+- **60 MB** is a client guard borrowed from work items; Azure documents no PR limit.
+- **The preview carries a privacy note**: a screenshot of HML/PROD often shows a
+  customer's name or CPF, and a PR attachment stays after the PR is completed.
+
+`--attach-images` on `pr comment`, `reply`, `edit-comment` and `set-desc` finds
+`![alt](<local path>)` in the body (relative to the body file; spaces, `<…>`, `%20` and a
+title are understood; urls and code blocks are left alone), checks **every** file before
+the first upload, uploads each distinct file once and posts the body with the urls.
+**Without the flag a body with a local image is refused**: before, it was posted with a
+link Azure cannot follow, silently. `pr create` and `pr comment --batch` refuse local
+images (the PR must exist; a batch is all-or-nothing). If the post fails after the
+uploads, the images stay on the PR and the same command can be re-run.
 
 #### `wi attach` — putting a file on the item
 
@@ -647,7 +688,7 @@ same numbers.
 ## 11. Operating rules for an autonomous caller
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
-   no `--dry-run`. Only `build rerun`, `wi create` and `wi attach` refuse to act without
+   no `--dry-run`. Only `build rerun`, `wi create`, `wi attach` and `pr attach` refuse to act without
    confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.
@@ -694,6 +735,7 @@ base url, so they can never read a real config or reach a real org.
 |---|---|
 | `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
+| `test/pr-attach.test.js` | `pr attach` and `--attach-images`: name cleaning, the reuse/refuse rule by SHA-1, url forms, error explanations, local-image detection (spaces, `<…>`, `%20`, titles, code left alone), `noRetryStatus` in `request()`, the recovered-after-error upload, and the CLI end to end against a fake Azure on an ephemeral port (preview, upload, re-run, clash, refused names, wrong project, no author e-mail, the 4000-char cap counted with urls). |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 
 The cases worth knowing are the ones asserting what must **not** count: a same-value
