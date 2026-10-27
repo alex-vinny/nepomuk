@@ -26,7 +26,8 @@
  *   wi set-state <wi-url> <state>  Change a work item's state (System.State)
  *   wi link-pr  <wi-url> <pr-url>  Link an existing pull request to a work item
  *   wi add-link <wi> <target> [--type related|parent|child|…] [--yes]  Link two work items (dry-run unless --yes)
- *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>]
+ *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>] [--yes]  One Task (previews unless --yes)
+ *   wi create-tasks <parent-url> --plan <file.json> [--assignee <email>] [--yes]  Tasks of a plan file (previews unless --yes)
  *   wi attachments <wi-url>        List attachments
  *   wi attach   <wi-url> <file>    Attach a local file (previews unless --yes)
  *   wi download <wi-url>  <n|name>  Download attachment (by index or name)
@@ -46,6 +47,7 @@ const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring 
 const { request, validatePat } = require('./lib/api');
 const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
+const tasks = require('./lib/tasks');
 const relations = require('./lib/relations');
 const fmt = require('./lib/format');
 const build = require('./lib/build');
@@ -131,7 +133,7 @@ const KNOWN_FLAGS = new Set([
   'name', 'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'parent', 'pat',
   'pat-name', 'pat-valid-to', 'pat-warn-days', 'patch', 'profile', 'project', 'raw', 'repo',
   'since', 'source', 'state', 'status', 'target', 'team', 'time-in-state', 'title',
-  'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes',
+  'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes', 'plan',
   'against', 'batch', 'verify', 'no-strict-flags',
   'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
 ]);
@@ -1821,45 +1823,98 @@ async function cmdWiCreate(flags, config) {
   console.log(`${base}/${org}/${encodeURIComponent(project)}/_workitems/edit/${result.id}`);
 }
 
+const flagValue = v => (v != null && v !== true ? v : undefined);
+
+function printTaskPreview(parentId, list) {
+  for (const { title, fields } of list) {
+    const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
+    const who = fields['System.AssignedTo'] || '(nobody)';
+    console.log(`  · ${title}  —  ${est != null ? `${est}h` : 'no estimate'} · ${fields['Microsoft.VSTS.Common.Activity']} · ${who}`);
+  }
+  console.log(`  parent     : #${parentId}`);
+}
+
+/**
+ * `wi create-task` — one Task under a parent. Previews unless --yes, like `wi create`: a Task
+ * is a write that no dry-run used to guard, and an agent that "just checked" created it.
+ */
 async function cmdWiCreateTask(rawParentUrl, title, flags, config) {
-  if (!title) die('Missing task title. Usage: wi create-task <parent-url|id> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]');
+  if (!title) die('Missing task title. Usage: wi create-task <parent-url|id> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>] [--activity <name>] [--yes]');
   const parent = needWorkItemUrlOrId(rawParentUrl, config, flags);
 
   // Inherit Area/Iteration (and assignee, unless overridden) from the parent work item.
   const parentWi = await wi.getWorkItem({ config, ...parent });
-  const pf = parentWi.fields || {};
+  let fields;
+  try {
+    fields = tasks.taskFields({
+      title, hours: flagValue(flags.estimate), desc: flagValue(flags.desc),
+      activity: flagValue(flags.activity), assignee: flagValue(flags.assignee),
+    }, parentWi.fields || {});
+  } catch (e) { die(e.message); }
 
-  const fields = { 'System.Title': title };
-  if (pf['System.AreaPath']) fields['System.AreaPath'] = pf['System.AreaPath'];
-  if (pf['System.IterationPath']) fields['System.IterationPath'] = pf['System.IterationPath'];
-
-  if (flags.desc) fields['System.Description'] = flags.desc;
-
-  // Activity is required on Tasks in some processes (picklist: Development/Design/Testing/...).
-  fields['Microsoft.VSTS.Common.Activity'] =
-    (flags.activity && flags.activity !== true) ? flags.activity : 'Development';
-
-  if (flags.estimate != null && flags.estimate !== true) {
-    const hours = parseFloat(flags.estimate);
-    if (!isNaN(hours)) {
-      fields['Microsoft.VSTS.Scheduling.OriginalEstimate'] = hours;
-      fields['Microsoft.VSTS.Scheduling.RemainingWork'] = hours;
-    }
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
+    printTaskPreview(parent.id, [{ title: fields['System.Title'], fields }]);
+    return;
   }
 
-  const assignee = flags.assignee || pf['System.AssignedTo']?.uniqueName || pf['System.AssignedTo']?.displayName;
-  if (assignee) fields['System.AssignedTo'] = assignee;
-
   const result = await wi.createWorkItem({
-    config,
-    org: parent.org,
-    project: parent.project,
-    type: 'Task',
-    fields,
-    parentId: parent.id,
+    config, org: parent.org, project: parent.project, type: 'Task', fields, parentId: parent.id,
   });
   const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
-  console.log(`Created Task #${result.id}: ${title}${est != null ? ` (${est}h)` : ''} — child of #${parent.id}`);
+  console.log(`Created Task #${result.id}: ${fields['System.Title']}${est != null ? ` (${est}h)` : ''} — child of #${parent.id}`);
+}
+
+/**
+ * `wi create-tasks` — the Tasks of a plan file under one parent (how a refinement breaks a PBI
+ * into estimated Tasks). The whole plan is validated before the first create; with --yes the
+ * Tasks go in order and the run stops at the first failure, saying which were already created.
+ */
+async function cmdWiCreateTasks(rawParentUrl, flags, config) {
+  const planFile = flagValue(flags.plan);
+  if (!planFile) die('Missing --plan. Usage: wi create-tasks <parent-url|id> --plan <file.json> [--assignee <email>] [--activity <name>] [--yes]');
+  const parent = needWorkItemUrlOrId(rawParentUrl, config, flags);
+
+  let list;
+  try {
+    const plan = JSON.parse(require('fs').readFileSync(planFile, 'utf8'));
+    list = tasks.parsePlan(plan, parent.id);
+  } catch (e) { die(`--plan "${planFile}": ${e.message}`); }
+
+  const parentWi = await wi.getWorkItem({ config, ...parent });
+  const pf = parentWi.fields || {};
+  let resolved;
+  try {
+    resolved = list.map(t => ({
+      title: t.title,
+      fields: tasks.taskFields({
+        ...t,
+        activity: t.activity || flagValue(flags.activity),
+        assignee: t.assignee || flagValue(flags.assignee),
+      }, pf),
+    }));
+  } catch (e) { die(e.message); }
+
+  console.log(`${resolved.length} task(s), ${tasks.totalHours(list)}h, under #${parent.id} — ${pf['System.Title'] || ''}`);
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
+    printTaskPreview(parent.id, resolved);
+    return;
+  }
+
+  const created = [];
+  for (const { title, fields } of resolved) {
+    try {
+      const result = await wi.createWorkItem({
+        config, org: parent.org, project: parent.project, type: 'Task', fields, parentId: parent.id,
+      });
+      created.push(result.id);
+      const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
+      console.log(`Created Task #${result.id}: ${title}${est != null ? ` (${est}h)` : ''} — child of #${parent.id}`);
+    } catch (e) {
+      die(`stopped at "${title}": ${e.message}\n  already created: ${created.length ? created.map(id => `#${id}`).join(', ') : 'none'} — fix the plan and re-run only the remaining tasks`);
+    }
+  }
 }
 
 async function cmdWiSetEstimate(rawUrl, hoursStr, config, flags) {
@@ -2631,7 +2686,8 @@ Usage:
   azure-connector wi create      --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>] [--from-markdown] [--activity <name>]
                                  [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--parent <id>] [--yes]
                                  # creates ANY type (Product Backlog Item, Bug, Feature…); dry-run unless --yes
-  azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>]
+  azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>] [--activity <name>] [--yes]   # previews unless --yes
+  azure-connector wi create-tasks <parent-url> --plan <file.json> [--assignee <email>] [--activity <name>] [--yes]   # every Task of the plan; previews unless --yes
    azure-connector wi attachments <wi-url>
    azure-connector wi attach      <wi-url> <file> [--name <n>] [--comment "<text>"] [--allow-duplicate] [--yes] [--json]
                                    # upload a local file and link it; DRY RUN unless --yes. --name renames it on the item; a name already on the item is refused (Azure would keep both)
@@ -2804,6 +2860,7 @@ async function main() {
     if (sub === 'add-link')    return cmdWiAddLink(arg1, arg2, flags, config);
     if (sub === 'create') return cmdWiCreate(flags, config);
     if (sub === 'create-task') return cmdWiCreateTask(arg1, arg2, flags, config);
+    if (sub === 'create-tasks') return cmdWiCreateTasks(arg1, flags, config);
     if (sub === 'set-estimate') return cmdWiSetEstimate(arg1, arg2, config, flags);
     if (sub === 'attachments') return cmdWiAttachments(arg1, config, flags);
     if (sub === 'attach')      return cmdWiAttach(arg1, arg2, flags, config);

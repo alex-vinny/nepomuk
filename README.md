@@ -1113,8 +1113,11 @@ node index.js wi create --project Platform --type "Product Backlog Item" \
 
 ```bash
 node index.js wi create-task <parent-url> "<title>" \
-  [--estimate <hours>] [--desc "<text>"] [--assignee <email>] [--activity <name>]
+  [--estimate <hours>] [--desc "<text>"] [--assignee <email>] [--activity <name>] [--yes]
 ```
+
+**Previews unless `--yes`** (since 2026-10-27 — it used to create on the spot, and an agent
+that only meant to check left a Task behind).
 
 Creates a `Task` linked as a child (`System.LinkTypes.Hierarchy-Reverse`) of the
 parent work item (PBI/Bug). The new Task **inherits the parent's Area Path,
@@ -1129,8 +1132,31 @@ Iteration Path, and Assignee** unless `--assignee` overrides it.
 Example — break a PBI into child tasks:
 ```bash
 node index.js wi create-task https://dev.azure.com/contoso/MyBoard/_workitems/edit/64898 \
-  "[A] CrmJobService: TimerTrigger" --estimate 4 --desc "Create the TimerTrigger function..."
+  "[A] CrmJobService: TimerTrigger" --estimate 4 --desc "Create the TimerTrigger function..." --yes
 ```
+
+#### Create the Tasks of a plan
+
+```bash
+node index.js wi create-tasks <parent-url|id> --plan <file.json> [--assignee <email>] [--activity <name>] [--yes]
+```
+
+Breaks a PBI into estimated Tasks from one file. The plan is a list of tasks, or an object
+keyed by parent id, so one file can carry a whole Feature:
+
+```json
+{
+  "69426": [ { "title": "[DEV] T1 · Contrato", "hours": 4, "desc": "..." } ],
+  "69427": [ { "titulo": "[DEV] T1 · Serviço", "horas": 6 } ]
+}
+```
+
+- `title`/`titulo` is required; `hours`/`horas` fills `OriginalEstimate` and `RemainingWork`;
+  `desc`, `activity` and `assignee` are optional per task (`--assignee`/`--activity` are the default).
+- The whole plan is checked before the first create; a bad entry rejects the plan with nothing created.
+- With `--yes` the Tasks go in order and the run stops at the first failure, listing what was
+  already created, so a re-run takes only the rest.
+- **Previews unless `--yes`.**
 
 ---
 
