@@ -11,9 +11,11 @@
  *   pr get      <pr-url>           Get PR metadata
  *   pr create   <repo-url> --title <t> [--source <b>] [--target <b>] [--desc <t>|--desc-file <p>|--body-file <p>] [--work-items <ids>] [--draft]  Create a PR
  *   pr comments <pr-url>           List PR comment threads
- *   pr comment  <pr-url> --body-file <path> [--file <path> --line <n>]   Add a PR comment (markdown file)
- *   pr reply        <pr-url> <threadId> --body-file <path> [--comment <n>]  Reply inside an existing thread (markdown file)
- *   pr edit-comment <pr-url> <threadId> --body-file <path> [--comment <n>]  Edit a comment in place (markdown file)
+ *   pr comment  <pr-url> --body-file <path> [--file <path> --line <n>] [--attach-images]   Add a PR comment (markdown file)
+ *   pr reply        <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  Reply inside an existing thread (markdown file)
+ *   pr edit-comment <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  Edit a comment in place (markdown file)
+ *   pr attachments  <pr-url>       List attachments
+ *   pr attach   <pr-url> <file>    Attach a local file (previews unless --yes)
  *   pr delete-thread <pr-url> <threadId> [--comment <n>]  Delete comment + close thread
  *   pr close-thread  <pr-url> <threadId>                  Close/resolve a thread
  *   wi get      <wi-url>           Get work item data
@@ -122,7 +124,7 @@ function parseArgs(argv) {
 // that read the error and correct themselves. `--no-strict-flags` is the escape
 // hatch for a genuinely unattended pipeline.
 const KNOWN_FLAGS = new Set([
-  'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'area', 'as-comment', 'assignee',
+  'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'area', 'as-comment', 'assignee', 'attach-images',
   'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
   'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
   'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'iteration', 'json', 'line',
@@ -724,6 +726,13 @@ async function cmdPrCommentBatch(rawUrl, flags, config) {
       const bodyPath = path.isAbsolute(item.bodyFile) ? item.bodyFile : path.join(base, item.bodyFile);
       const content = fs.readFileSync(bodyPath, 'utf8');
       if (!content.trim()) throw new Error(`body file "${item.bodyFile}" is empty`);
+      // Uploading inside an all-or-nothing batch needs its own rules (what if post #5
+      // fails after the images went up?), so a batch refuses local images for now.
+      const localImages = pr.findLocalImageRefs(content, { baseDir: path.dirname(bodyPath) });
+      if (localImages.length) {
+        throw new Error(`body points at local image(s) (${localImages.map((r) => r.ref).join(', ')}), which a batch `
+          + 'does not upload; post that comment alone with `pr comment --attach-images`');
+      }
 
       let filePath = normalizeAzureRepoPath(item.file);
       const lineNumber = item.line != null ? parseInt(item.line, 10) : null;
@@ -847,14 +856,19 @@ async function cmdPrComment(rawUrl, text, flags, config) {
     }
   }
 
+  const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
+
   if (flags['dry-run']) {
     console.log('DRY RUN — nothing posted.');
     console.log(filePath ? `Would anchor at: ${filePath}:${lineNumber ?? '(file-level)'} [${side} side]` : 'Would post a PR-level comment.');
-    console.log(`Body (${content.length} chars):\n${content}`);
+    const body = images ? images.preview : content;
+    if (images) printImagePlan(images);
+    console.log(`Body (${body.length} chars):\n${body}`);
     return;
   }
 
-  const result = await pr.addComment({ config, ...p, content, filePath, lineNumber, side });
+  if (images) content = await images.commit();
+  const result = await postAfterImages(images, () => pr.addComment({ config, ...p, content, filePath, lineNumber, side }));
   console.log(`Comment posted. Thread ID: ${result.id}`);
   if (result.threadContext?.filePath) {
     const loc = result.threadContext.rightFileStart?.line || result.threadContext.leftFileStart?.line;
@@ -916,13 +930,35 @@ async function cmdPrSetDesc(rawUrl, text, flags, config) {
   }
 
   // Azure DevOps limits the PR description to 4000 characters (API returns HTTP 400 otherwise).
+  // With images the limit is checked on the rewritten text, before anything is uploaded:
+  // each attachment url is ~190 characters.
   const MAX_PR_DESCRIPTION = 4000;
-  if (description != null && description.length > MAX_PR_DESCRIPTION) {
-    die(`PR description has ${description.length} characters; Azure DevOps allows at most ${MAX_PR_DESCRIPTION}. `
-      + `Trim it (e.g. keep the summary in the description and move extra detail into a PR comment).`);
+  const tooLong = (d, note = '') => `PR description has ${d.length} characters${note}; Azure DevOps allows at most `
+    + `${MAX_PR_DESCRIPTION}. Trim it (e.g. keep the summary in the description and move extra detail into a PR comment).`;
+  const images = description != null
+    ? await planPrBodyImages({ content: description, bodyFile: flags['body-file'], flags, config, p })
+    : null;
+  const measured = images ? images.preview : description;
+  if (measured != null && measured.length > MAX_PR_DESCRIPTION) {
+    die(tooLong(measured, images ? ' once the image urls are in' : '') + (images ? ' Nothing was uploaded.' : ''));
   }
 
-  await pr.updatePullRequest({ config, ...p, title: newTitle, description });
+  if (flags['dry-run']) {
+    console.log('DRY RUN — nothing updated.');
+    if (newTitle) console.log(`Title: ${newTitle}`);
+    if (images) printImagePlan(images);
+    if (measured != null) console.log(`Description (${measured.length} chars):\n${measured}`);
+    return;
+  }
+
+  if (images) {
+    description = await images.commit();
+    if (description.length > MAX_PR_DESCRIPTION) {
+      die(`${tooLong(description, ' with the real urls')} The images are attached to the PR; after trimming, `
+        + 're-run: identical files are reused, not uploaded again.');
+    }
+  }
+  await postAfterImages(images, () => pr.updatePullRequest({ config, ...p, title: newTitle, description }));
   console.log(`PR #${p.prId} updated${newTitle ? ' (title)' : ''}${description != null ? ' (description)' : ''}.`);
 }
 
@@ -961,7 +997,16 @@ async function cmdPrReply(rawUrl, threadIdStr, text, flags, config) {
   if (!content.trim()) die('Reply body file is empty.');
   const p = needPrUrlOrId(rawUrl, config, flags);
   const parentCommentId = flags.comment ? parseInt(flags.comment, 10) : 1;
-  const result = await pr.replyToThread({ config, ...p, threadId, content, parentCommentId });
+  const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing posted. Would reply in thread ${threadId} (to comment ${parentCommentId}).`);
+    const body = images ? images.preview : content;
+    if (images) printImagePlan(images);
+    console.log(`Body (${body.length} chars):\n${body}`);
+    return;
+  }
+  if (images) content = await images.commit();
+  const result = await postAfterImages(images, () => pr.replyToThread({ config, ...p, threadId, content, parentCommentId }));
   console.log(`Reply posted in thread ${threadId} (comment id ${result.id}).`);
 }
 
@@ -984,7 +1029,16 @@ async function cmdPrEditComment(rawUrl, threadIdStr, text, flags, config) {
   if (!content.trim()) die('Comment body file is empty.');
   const p = needPrUrlOrId(rawUrl, config, flags);
   const commentId = flags.comment ? parseInt(flags.comment, 10) : 1;
-  await pr.editComment({ config, ...p, threadId, commentId, content });
+  const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing updated. Would replace comment ${commentId} in thread ${threadId}.`);
+    const body = images ? images.preview : content;
+    if (images) printImagePlan(images);
+    console.log(`Body (${body.length} chars):\n${body}`);
+    return;
+  }
+  if (images) content = await images.commit();
+  await postAfterImages(images, () => pr.editComment({ config, ...p, threadId, commentId, content }));
   console.log(`Comment ${commentId} in thread ${threadId} updated.`);
 }
 
@@ -995,6 +1049,224 @@ async function cmdPrCloseThread(rawUrl, threadIdStr, config, flags = {}) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   await pr.updateThread({ config, ...p, threadId, status: 'closed' });
   console.log(`Thread ${threadId} closed.`);
+}
+
+// ── PR attachments ─────────────────────────────────────────────────────────
+
+// Read the PR (for its project/repo GUIDs, title and status) and its attachments.
+// The PR lookup comes first so a wrong project fails here, before any byte is read.
+async function lookupPrForAttach(config, p, fileName) {
+  let data;
+  try {
+    data = await pr.getPullRequest({ config, ...p });
+  } catch (err) {
+    die(pr.explainPrAttachmentError(err, { fileName, project: p.project, repo: p.repo, prId: p.prId }) || err.message);
+  }
+  const projectId = data.repository && data.repository.project && data.repository.project.id;
+  const repoId = data.repository && data.repository.id;
+  if (!projectId || !repoId) die(`Could not read the repository and project ids of PR !${p.prId}. Nothing was uploaded.`);
+  const existing = await pr.listPrAttachments({ config, ...p });
+  return {
+    data,
+    projectId,
+    repoId,
+    existing,
+    project: data.repository.project.name || p.project,
+    repo: data.repository.name || p.repo,
+  };
+}
+
+// The point is only that a reader sees it before the upload; the tool cannot read an image.
+const PR_ATTACHMENT_PRIVACY_NOTE = 'A PR attachment is visible to everyone who reads the repo and stays after the PR '
+  + 'is completed. Check that the file shows no customer personal data (LGPD).';
+
+async function cmdPrAttachments(rawUrl, config, flags) {
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  let attachments;
+  try {
+    attachments = await pr.listPrAttachments({ config, ...p });
+  } catch (err) {
+    die(pr.explainPrAttachmentError(err, { project: p.project, repo: p.repo, prId: p.prId }) || err.message);
+  }
+  if (flags.json) {
+    console.log(JSON.stringify(attachments.map(fmt.prAttachmentSummary), null, 2));
+    return;
+  }
+  fmt.printPrAttachments(attachments);
+}
+
+// Attach a local file to a PR. Previews unless --yes. The url printed is the GUID form
+// Azure returns: unlike a work item, that is the form a PR comment renders, so it is
+// handed back as is.
+async function cmdPrAttach(rawUrl, filePath, flags, config) {
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  if (!filePath || filePath === true) {
+    die('Usage: pr attach <pr-url|id> <file> [--name <n>] [--yes] [--json]');
+  }
+  if (!fs.existsSync(filePath)) die(`File not found: ${filePath}`);
+  const stat = fs.statSync(filePath);
+  if (stat.isDirectory()) die(`"${filePath}" is a directory. Attach a single file, or zip it first.`);
+
+  // An explicit --name is taken as typed, and refused if it would break a link; the
+  // file's own name is cleaned up quietly, because nobody chose it for a url.
+  const explicit = flags.name && flags.name !== true;
+  const fileName = explicit ? flags.name : pr.sanitizeAttachmentName(path.basename(filePath));
+  if (!fileName) die(`"${path.basename(filePath)}" leaves no usable attachment name. Pass --name "<name.ext>".`);
+  // Name, type and size first: they need no network, so a bad one fails before the PR is read.
+  const intrinsic = pr.checkPrAttachment({ fileName, size: stat.size });
+  if (!intrinsic.ok) die(intrinsic.message);
+
+  const target = await lookupPrForAttach(config, p, fileName);
+  const taken = target.existing.some((a) => String(a.displayName || '').toLowerCase() === String(fileName).toLowerCase());
+  // The hash is only needed to compare against a file of the same name.
+  const buffer = (flags.yes || taken) ? fs.readFileSync(filePath) : null;
+  const sha1 = buffer ? pr.sha1Hex(buffer) : undefined;
+  const check = pr.checkPrAttachment({ fileName, size: stat.size, sha1, existing: target.existing });
+  if (!check.ok) die(check.message);
+
+  const status = target.data.status;
+  if (!flags.yes) {
+    console.log('DRY RUN — nothing uploaded. Re-run with --yes to attach.\n');
+    console.log(JSON.stringify({
+      pullRequest: p.prId,
+      title: target.data.title,
+      status,
+      project: target.project,
+      repo: target.repo,
+      file: filePath,
+      attachAs: fileName,
+      bytes: stat.size,
+      action: check.action === 'reuse' ? 'reuse-existing (same name and content: nothing to upload)' : 'upload',
+      existingAttachments: target.existing.map((a) => a.displayName),
+      note: PR_ATTACHMENT_PRIVACY_NOTE,
+    }, null, 2));
+    if (status && status !== 'active') console.error(`note: PR !${p.prId} is ${status}.`);
+    return;
+  }
+
+  if (status && status !== 'active') console.error(`note: PR !${p.prId} is ${status}.`);
+  let result;
+  try {
+    result = await pr.attachToPullRequest({
+      config, org: p.org, project: p.project, repo: p.repo, prId: p.prId,
+      projectId: target.projectId, repoId: target.repoId, fileName, buffer, existing: target.existing,
+    });
+  } catch (err) {
+    die(pr.explainPrAttachmentError(err, { fileName, project: p.project, repo: p.repo, prId: p.prId }) || err.message);
+  }
+
+  const a = result.attachment;
+  const markdown = pr.attachmentMarkdown({ url: a.url, alt: a.displayName || fileName });
+  if (flags.json) {
+    console.log(JSON.stringify({
+      id: a.id, name: a.displayName || fileName, url: a.url, markdown, bytes: stat.size,
+      contentHash: a.contentHash || result.sha1, reused: result.reused, recovered: result.recovered,
+    }, null, 2));
+    return;
+  }
+  if (result.reused) {
+    console.log(`"${fileName}" is already on PR !${p.prId} with the same content — nothing uploaded.`);
+  } else {
+    console.log(`Attached "${a.displayName || fileName}" to PR !${p.prId} — ${stat.size} bytes.`);
+    if (result.recovered) console.error('note: the upload reported an error, but the file is on the PR (same name and hash).');
+  }
+  console.log(a.url);
+  console.log(`\nMarkdown:\n${markdown}`);
+}
+
+// Local images in a PR markdown body (`![alt](./shot.png)`). Azure cannot reach a file
+// on this machine, so without this the post would show a broken image and say nothing.
+// Refused unless --attach-images; with it, every file is checked (name, size, hash
+// against what the PR already holds) BEFORE any upload, and the caller gets:
+//   preview  — the body with the urls the uploads will get (real length)
+//   commit() — uploads (reusing identical files) and returns the final body
+// Returns null when the body has no local image.
+async function planPrBodyImages({ content, bodyFile, flags, config, p }) {
+  const baseDir = (bodyFile && bodyFile !== true) ? path.dirname(path.resolve(bodyFile)) : process.cwd();
+  const refs = pr.findLocalImageRefs(content, { baseDir });
+  if (!refs.length) return null;
+  if (!flags['attach-images']) {
+    die(`The body points at ${refs.length} local image(s):\n${refs.map((r) => `  ${r.ref}`).join('\n')}\n`
+      + 'Azure cannot reach a file on this machine, so the post would show a broken image. Nothing was posted.\n'
+      + 'Re-run with --attach-images to upload them to the PR and link them, or replace them with urls.');
+  }
+  let uploads;
+  try {
+    uploads = pr.planImageUploads(refs);
+  } catch (err) {
+    die(`${err.message}\nNothing was posted.`);
+  }
+  for (const u of uploads) {
+    let st;
+    try { st = fs.statSync(u.file); } catch { die(`Image "${u.refs[0]}" not found (resolved to ${u.file}). Nothing was posted.`); }
+    if (st.isDirectory()) die(`Image "${u.refs[0]}" is a directory. Nothing was posted.`);
+    u.bytes = st.size;
+  }
+
+  const target = await lookupPrForAttach(config, p, uploads[0].name);
+  const base = `${config.baseUrl}/${p.org || config.org}`;
+  for (const u of uploads) {
+    u.buffer = fs.readFileSync(u.file);
+    const check = pr.checkPrAttachment({ fileName: u.name, size: u.bytes, sha1: pr.sha1Hex(u.buffer), existing: target.existing });
+    if (!check.ok) die(`${check.message}\nNothing was posted.`);
+    u.action = check.action;
+    u.url = check.action === 'reuse'
+      ? check.attachment.url
+      : pr.predictedAttachmentUrl({ base, projectId: target.projectId, repoId: target.repoId, prId: p.prId, fileName: u.name });
+  }
+
+  const byFile = new Map(uploads.map((u) => [u.file, u]));
+  const render = () => pr.rewriteImageRefs(content, refs, (r) => byFile.get(path.resolve(r.file)).url);
+  return {
+    uploads,
+    status: target.data.status,
+    preview: render(),
+    async commit() {
+      for (const u of uploads) {
+        if (u.action === 'reuse') continue;
+        let result;
+        try {
+          result = await pr.attachToPullRequest({
+            config, org: p.org, project: p.project, repo: p.repo, prId: p.prId,
+            projectId: target.projectId, repoId: target.repoId, fileName: u.name, buffer: u.buffer, existing: target.existing,
+          });
+        } catch (err) {
+          const done = uploads.filter((x) => x.done).map((x) => x.name);
+          die(`${pr.explainPrAttachmentError(err, { fileName: u.name, project: p.project, repo: p.repo, prId: p.prId }) || err.message}\n`
+            + 'Nothing was posted.'
+            + (done.length ? ` Already attached: ${done.join(', ')}; re-running reuses them.` : ''));
+        }
+        u.url = result.attachment.url;
+        u.done = true;
+        console.error(`  attached: ${u.name} (${u.bytes} bytes)${result.recovered ? ' — confirmed after an error' : ''}`);
+      }
+      return render();
+    },
+  };
+}
+
+function printImagePlan(images) {
+  console.log('Images (uploaded only without --dry-run):');
+  for (const u of images.uploads) {
+    console.log(`  ${u.action === 'reuse' ? 'reuse ' : 'upload'}  ${u.name}  ${u.bytes} bytes  <- ${u.refs[0]}`);
+  }
+  console.log(`note: ${PR_ATTACHMENT_PRIVACY_NOTE}`);
+  if (images.status && images.status !== 'active') console.log(`note: the PR is ${images.status}.`);
+}
+
+// Run the post; if it fails after images were uploaded, say they are on the PR and
+// that a re-run reuses them, so nobody uploads a second copy under a new name.
+async function postAfterImages(images, post) {
+  try {
+    return await post();
+  } catch (err) {
+    const done = images ? images.uploads.filter((u) => u.done).map((u) => u.name) : [];
+    if (done.length) {
+      err.message += `\nThe images are already attached to the PR (${done.join(', ')}). `
+        + 'Re-running the same command reuses them instead of uploading again.';
+    }
+    throw err;
+  }
 }
 
 async function cmdPrCreate(rawUrl, flags, config) {
@@ -1015,6 +1287,16 @@ async function cmdPrCreate(rawUrl, flags, config) {
   if (descFile) {
     try { description = require('fs').readFileSync(descFile, 'utf8'); }
     catch (e) { die(`Could not read description file "${descFile}": ${e.message}`); }
+  }
+
+  // An image upload needs the PR to exist, so a local image cannot ride along here.
+  const localImages = pr.findLocalImageRefs(description, {
+    baseDir: descFile ? path.dirname(path.resolve(descFile)) : process.cwd(),
+  });
+  if (localImages.length) {
+    die(`The description points at ${localImages.length} local image(s) (${localImages.map((r) => r.ref).join(', ')}), `
+      + 'and a PR attachment needs the PR to exist. Create the PR without them, then run '
+      + '`pr set-desc <pr> --body-file <path> --attach-images`. Nothing was created.');
   }
 
   // Azure DevOps caps a PR description at 4000 characters (the API answers HTTP 400
@@ -2312,11 +2594,16 @@ Usage:
                                    (note: Azure DevOps limits the PR description to 4000 chars)
   azure-connector pr diff          <pr-url|pr-id> [--full]               Unified diff of every changed file; --full dumps whole file contents instead
   azure-connector pr comments      <pr-url>
-  azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate]   # Markdown file; inline text is not supported
+  azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate] [--attach-images]   # Markdown file; inline text is not supported
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
-  azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>]  # Markdown file; inline text is not supported
-  azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>]  # Markdown file; inline text is not supported
-  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"]   # update PR description/title in place
+  azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
+  azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
+  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"] [--attach-images] [--dry-run]   # update PR description/title in place
+                                   # --attach-images: a body with ![alt](./local.png) uploads each image to the PR and links it;
+                                   # without the flag such a body is refused (Azure would show a broken image)
+  azure-connector pr attachments   <pr-url|pr-id> [--json]                          # list PR attachments (name, date, author, url)
+  azure-connector pr attach        <pr-url|pr-id> <file> [--name <n>] [--yes] [--json]   # attach a file to the PR; previews unless --yes;
+                                   # prints the url + a ready ![name](url) line; same name + same content is reused, different content refused
   azure-connector pr abandon       <pr-url>                                          # set PR status to abandoned (branches remain)
   azure-connector pr complete      <pr-url|pr-id> [--strategy noFastForward|squash|rebase|rebaseMerge] [--delete-source-branch] [--transition-work-items]
                                    [--message-file <path>] [--bypass "<reason>" | --auto] [--expect-head <sha>] [--yes]
@@ -2494,6 +2781,8 @@ async function main() {
     if (sub === 'complete')      return cmdPrComplete(arg1, flags, config);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
     if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config, flags);
+    if (sub === 'attachments')   return cmdPrAttachments(arg1, config, flags);
+    if (sub === 'attach')        return cmdPrAttach(arg1, arg2, flags, config);
     if (sub === 'timeline')      return cmdPrTimeline(arg1, flags, config);
     die(`Unknown pr subcommand: ${sub}`);
   }

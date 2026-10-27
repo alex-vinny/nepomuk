@@ -464,6 +464,40 @@ Thread IDs come from `pr comments`. `--comment <n>` targets a comment other than
 
 ---
 
+#### Attach a file or a screenshot to a PR
+
+```bash
+# List what the PR already holds (name, date, author name, url)
+node index.js pr attachments <pr-url>
+
+# Preview, then upload; prints the url and a ready ![name](url) line
+node index.js pr attach <pr-url> ./shot.png
+node index.js pr attach <pr-url> ./shot.png --yes
+
+# A body that points at local images: upload them and post, in one call
+#   reply.md:  Fixed in abc123.  ![before/after](./evidence.png)
+node index.js pr reply <pr-url> <threadId> --body-file ./reply.md --attach-images --dry-run
+node index.js pr reply <pr-url> <threadId> --body-file ./reply.md --attach-images
+```
+
+A PR attachment is addressed by its **file name**, so:
+
+- the same name with the same bytes (SHA-1 against Azure's `contentHash`) is **reused**, and
+  a re-run never uploads a second copy; the same name with different bytes is **refused**,
+  because the new file could replace the picture existing comments show;
+- names are cleaned for the url (accents dropped, spaces and parentheses become `-`);
+- the url printed is the GUID form Azure returns. That is the form the PR UI itself writes
+  when you paste a screenshot, and it renders — unlike a work-item comment (see `wi attach`).
+
+`--attach-images` works on `pr comment`, `pr reply`, `pr edit-comment` and `pr set-desc`.
+Every image is checked before the first upload, and `set-desc` counts the 4000-character
+limit with the urls in. **Without the flag, a body that points at a local image is refused**:
+Azure cannot reach a file on your machine, and the post would show a broken image.
+Executables and scripts are never uploaded. Screenshots often show customer data: the
+preview reminds you, and a PR attachment stays after the PR is completed.
+
+---
+
 #### Update a PR's description or title
 
 ```bash
@@ -1567,6 +1601,8 @@ All calls use API version `7.1`. Key endpoints used:
 | Create work item | POST | `/_apis/wit/workitems/${type}` (JSON Patch body) |
 | Update work item | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch body) |
 | Upload attachment | POST | `/_apis/wit/attachments?fileName=...` (raw bytes, `application/octet-stream`) |
+| List PR attachments | GET | `/{project}/_apis/git/repositories/{repo}/pullRequests/{id}/attachments` |
+| Upload PR attachment | POST | `/{projectId}/_apis/git/repositories/{repoId}/pullRequests/{id}/attachments/{fileName}` (raw bytes; name in the **path**) |
 | Link attachment | PATCH | `/_apis/wit/workItems/{id}` (JSON Patch, `AttachedFile` relation) |
 | Download attachment | GET | attachment URL from work item relations |
 | Work item change history | GET | `/_apis/wit/workItems/{id}/updates` (paginated `$top`/`$skip`) |
