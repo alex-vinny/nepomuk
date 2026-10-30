@@ -1926,6 +1926,13 @@ async function cmdWiSetEstimate(rawUrl, hoursStr, config, flags) {
     { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.OriginalEstimate', value: hours },
     { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.RemainingWork', value: hours },
   ];
+  // `--dry-run` is a known flag globally, so without this check it passed the strict-flag
+  // gate and the estimate was written anyway (2026-10-30, Task #69736).
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — nothing written to #${p.id}.`);
+    console.log(`Would set OriginalEstimate = ${hours}, RemainingWork = ${hours}.`);
+    return;
+  }
   await wi.updateWorkItem({ config, ...p, ops });
   console.log(`Work item #${p.id} estimate set to ${hours}h.`);
 }
@@ -2680,7 +2687,9 @@ Usage:
   azure-connector wi edit-comment <wi-url> <commentId> --body-file <path> # Markdown file (converted to HTML); inline text is not supported
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
   azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"
-  azure-connector wi link-pr     <wi-url> <pr-url>           # link an existing PR to the work item
+  azure-connector wi set-estimate <wi-url> <hours> [--dry-run]   # opens a task: OriginalEstimate + RemainingWork (never CompletedWork)
+  azure-connector wi complete    <wi-url> --hours <n> [--dry-run] # closes a task: CompletedWork = n, RemainingWork = 0
+  azure-connector wi link-pr    <wi-url> <pr-url>           # link an existing PR to the work item
   azure-connector wi add-link    <wi-url|id> <target-url|id> [--type related|parent|child|predecessor|successor|duplicate|duplicate-of] [--comment "<t>"] [--yes]
                                  # link two work items (default: related); skips an existing identical link; dry-run unless --yes
   azure-connector wi create      --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>] [--from-markdown] [--activity <name>]

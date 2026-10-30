@@ -198,7 +198,8 @@ effect the moment it is invoked.**
 | `wi complete` | **yes** | `--dry-run` |
 | `wi comment` | **yes** | field-routing gate (exit 2) |
 | `wi edit-comment`, `wi delete-comment` | **yes** | none |
-| `wi set-estimate`, `wi link-pr` | **yes** | none |
+| `wi set-estimate` | **yes** | `--dry-run` |
+| `wi link-pr` | **yes** | none |
 | `wi create-task`, `wi create-tasks` | **yes** | **requires `--yes`**; previews otherwise (`create-tasks` validates the whole plan first) |
 | `wi create` | **yes** | **requires `--yes`**; previews otherwise, and the render guard runs on the preview too |
 | `wi attach` | **yes** | **requires `--yes`**; previews otherwise |
@@ -480,7 +481,7 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi edit-comment <url\|id> <commentId>` | `--body-file` (**required**) | Get the id from `wi comments --ids`. Same image inlining, length cap, stored-anyway check and Area-path project as `wi comment`. **Writes, no dry-run.** |
 | `wi delete-comment <url\|id> <commentId>` | — | Azure soft-deletes it. Project from the Area path, as above. **Writes, no dry-run.** |
 | `wi set-state <url\|id> "<state>"` | `--no-preflight`, `--dry-run`, `--type` | See §8.6. **Writes.** |
-| `wi set-estimate <url\|id> <hours>` | — | Writes `OriginalEstimate` **and** `RemainingWork`. **Never touches `CompletedWork`**, despite the name. This is the *opening* move. **Writes, no dry-run.** |
+| `wi set-estimate <url\|id> <hours>` | — | Writes `OriginalEstimate` **and** `RemainingWork`. **Never touches `CompletedWork`**, despite the name. This is the *opening* move. `--dry-run` previews (honoured since 2026-10-30; before that it was accepted and ignored, and the estimate was written). **Writes.** |
 | `wi complete <url\|id> --hours <n>` | `--dry-run` | The closing move: `CompletedWork = n`, `RemainingWork = 0`. A board that gates `Done` on `CompletedWork` rejects the transition until this runs. Pass `--hours 0` when the task closed without delivery — the record should not claim work that did not happen. **Writes.** |
 | `wi create --project <p> --type "<type>" --title "<t>"` | `--body-file` (+ `--from-markdown`), `--desc`, `--area`, `--iteration`, `--assignee <email>`, `--activity <name>`, `--parent <id>`, `--org`, `--force`, `--yes` | Creates a work item of **any** type (Product Backlog Item, Bug, Feature, …); the body goes to `System.Description`. Prints the resolved plan and exits unless `--yes`. The render guard runs on every field **before** the preview, so a preview never shows a create the lib would refuse. `--parent` links it as a child. **Writes only with `--yes`.** |
 | `wi create-task <parent-url\|id> "<title>"` | `--estimate <h>`, `--desc`, `--assignee <email>`, `--activity <name>` | Creates a `Task` as a child. **Inherits the parent's Area Path, Iteration Path and Assignee** unless overridden. `--activity` defaults to `Development` because some processes make Activity required, and a Task created without it fails with `TF401320`. **Previews unless `--yes`** (since 2026-10-27; it used to write with no dry-run). |
@@ -726,7 +727,7 @@ same numbers.
 npm test      # or: node --test
 ```
 
-184 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+248 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
 two kinds. The transport and comment tests drive the lib against a throwaway `127.0.0.1`
 server on an ephemeral port — the only way to assert that a binary body leaves as bytes,
 and that an error Azure returns *after* storing a comment is reported as stored. The

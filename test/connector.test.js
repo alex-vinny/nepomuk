@@ -1024,6 +1024,22 @@ test('wi create: the dry run already refuses a body the form would not render', 
   assert.doesNotMatch(res.stdout, /DRY RUN/, 'no preview of a write that would be refused');
 });
 
+test('wi set-estimate: --dry-run prints the plan and writes nothing', () => {
+  // The base url is a closed port: a write attempt would fail with exit 1, so exit 0
+  // here also proves no request left.
+  const res = runCli(() => ['wi', 'set-estimate', 'https://dev.azure.com/acme/Platform/_workitems/edit/42', '3', '--dry-run']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /DRY RUN — nothing written to #42/);
+  assert.match(res.stdout, /OriginalEstimate = 3, RemainingWork = 3/);
+  assert.doesNotMatch(res.stdout, /estimate set to/);
+});
+
+test('wi set-estimate: invalid hours fail before anything else', () => {
+  const res = runCli(() => ['wi', 'set-estimate', 'https://dev.azure.com/acme/Platform/_workitems/edit/42', 'tres', '--dry-run']);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /Invalid hours: tres/);
+});
+
 test('wi create: missing --type or --title fails before anything else', () => {
   const noType = runCli(() => ['wi', 'create', '--project', 'Platform', '--title', 'T']);
   assert.equal(noType.status, 1);

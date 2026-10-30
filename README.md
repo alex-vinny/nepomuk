@@ -1164,6 +1164,7 @@ keyed by parent id, so one file can carry a whole Feature:
 
 ```bash
 node index.js wi set-estimate <wi-url> <hours>
+node index.js wi set-estimate <wi-url> <hours> --dry-run
 ```
 
 Sets `OriginalEstimate` and `RemainingWork` (hours) on an existing work item.
