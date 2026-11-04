@@ -161,6 +161,33 @@ function unknownFlags(flags, known = KNOWN_FLAGS) {
     .map((k) => ({ flag: k, suggestion: closestFlag(k, known) }));
 }
 
+// --json is in KNOWN_FLAGS because many commands honour it, so the unknown-flag check
+// lets it through everywhere. On a command that only prints text, the flag used to be
+// accepted and ignored: `pr comments --json` printed text, exit 0, and the caller's
+// JSON.parse failed one step later — or worse, a caller that did not parse believed it
+// had the structured output. The list below is every command that really emits JSON;
+// on any other, --json is refused up front, like an unknown flag.
+const JSON_COMMANDS = new Set([
+  'sprints', 'iterations', 'create-repo',
+  'repo list', 'repo get', 'repo refs',
+  'pr get', 'pr list', 'pr comments', 'pr attachments', 'pr attach', 'pr timeline',
+  'wi get', 'wi search', 'wi missing', 'wi relations', 'wi updates', 'wi history', 'wi attach',
+  'build list', 'build last',
+]);
+
+/** Pure: does `<group> [sub]` emit JSON under --json? Groups without subcommands match on the group. */
+function supportsJson(group, sub) {
+  return JSON_COMMANDS.has(String(group)) || JSON_COMMANDS.has(`${group} ${sub}`);
+}
+
+function checkJsonSupported(flags, group, sub) {
+  if (!flags || !flags.json || supportsJson(group, sub)) return;
+  const cmd = !sub || sub === true ? String(group) : `${group} ${sub}`;
+  die(`--json is not supported by "${cmd}" — nothing was run. That command prints text only, `
+    + 'so the flag would have been ignored and the output would not parse. Drop --json, '
+    + `or use one of: ${[...JSON_COMMANDS].join(', ')}.`);
+}
+
 function checkUnknownFlags(flags, known = KNOWN_FLAGS) {
   const unknown = unknownFlags(flags, known);
   if (!unknown.length) return;
@@ -490,7 +517,62 @@ async function cmdPrList(rawRepo, flags, config) {
 async function cmdPrComments(rawUrl, config, flags = {}) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   const data = await pr.getComments({ config, ...p });
+  if (flags.json) {
+    console.log(JSON.stringify(pr.summarizeCommentThreads(data), null, 2));
+    return;
+  }
   fmt.printCommentThreads(data);
+}
+
+/**
+ * `pr vote <url|id> <vote>` — cast, change or clear YOUR vote (the PAT's identity).
+ *
+ * Without --yes it prints the PR, your current vote and the one it would set, and exits.
+ * The vote is a write that other people and branch policies act on, so it follows the
+ * same rule as `pr complete`: nothing changes without --yes. --expect-head refuses the
+ * vote when the PR moved after the review, so an approval never covers unread commits.
+ */
+async function cmdPrVote(rawUrl, voteArg, flags, config) {
+  if (voteArg === undefined || voteArg === true) {
+    die('Missing vote. Usage: pr vote <pr-url|id> <10|5|0|-5|-10|approve|approve-with-suggestions|reset|wait-for-author|reject> [--expect-head <sha>] [--yes]');
+  }
+  let vote;
+  try { vote = pr.parseVote(voteArg); } catch (e) { die(e.message); }
+
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const data = await pr.getPullRequest({ config, ...p });
+  const me = await validatePat(config);
+  const mine = (data.reviewers || []).find((r) => String(r.id).toLowerCase() === String(me.id).toLowerCase());
+  const current = mine ? Number(mine.vote) : null;
+  const head = data.lastMergeSourceCommit && data.lastMergeSourceCommit.commitId;
+  const branch = (r) => String(r || '').replace(/^refs\/heads\//, '');
+
+  console.log(`PR #${p.prId}: ${data.title}`);
+  console.log(`  ${branch(data.sourceRefName)} → ${branch(data.targetRefName)} · head ${head ? head.slice(0, 10) : '(unknown)'} · status ${data.status}`);
+  console.log(`  reviewer: ${me.user}${mine ? '' : ' (not on the PR yet — the vote adds you)'}`);
+  console.log(`  vote: ${current === null ? '(none)' : `${current} ${pr.voteLabel(current)}`} → ${vote} ${pr.voteLabel(vote)}`);
+
+  const blockers = pr.voteBlockers(data, { expectHead: flags['expect-head'] });
+  if (blockers.length) die(`Cannot vote on PR #${p.prId}:\n  - ${blockers.join('\n  - ')}`);
+
+  if (current === vote) {
+    console.log('\nYour vote is already that — nothing to change.');
+    return;
+  }
+  if (!flags.yes) {
+    console.log('\nDRY RUN — nothing was written. Re-run with --yes to set the vote.');
+    return;
+  }
+
+  await pr.setReviewerVote({ config, ...p, reviewerId: me.id, vote });
+
+  // Read it back: a 200 on the PUT is not proof the PR shows the vote.
+  const after = await pr.getPullRequest({ config, ...p });
+  const now = (after.reviewers || []).find((r) => String(r.id).toLowerCase() === String(me.id).toLowerCase());
+  if (!now || Number(now.vote) !== vote) {
+    die(`Azure accepted the request but PR #${p.prId} shows your vote as ${now ? now.vote : '(none)'}, not ${vote}. Check it in the web UI.`);
+  }
+  console.log(`\nVoted ${vote} (${pr.voteLabel(vote)}) on PR #${p.prId} as ${me.user}.`);
 }
 
 async function cmdPrAbandon(rawUrl, config, flags = {}) {
@@ -2655,7 +2737,7 @@ Usage:
   azure-connector pr create        <repo-url|pr-create-url> --title "<t>" [--source <branch>] [--target <branch>] [--desc "<text>"|--desc-file <path>|--body-file <path>] [--work-items 65019,123] [--draft]
                                    (note: Azure DevOps limits the PR description to 4000 chars)
   azure-connector pr diff          <pr-url|pr-id> [--full]               Unified diff of every changed file; --full dumps whole file contents instead
-  azure-connector pr comments      <pr-url>
+  azure-connector pr comments      <pr-url|pr-id> [--json]                          # threads + replies; --json = thread id, status, file:line, comments (author name only, no e-mail)
   azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate] [--attach-images]   # Markdown file; inline text is not supported
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
   azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
@@ -2670,6 +2752,8 @@ Usage:
   azure-connector pr complete      <pr-url|pr-id> [--strategy noFastForward|squash|rebase|rebaseMerge] [--delete-source-branch] [--transition-work-items]
                                    [--message-file <path>] [--bypass "<reason>" | --auto] [--expect-head <sha>] [--yes]
                                    # previews votes + pending policies without --yes; --bypass skips policies (needs permission), --auto arms auto-complete
+  azure-connector pr vote          <pr-url|pr-id> <10|5|0|-5|-10|approve|approve-with-suggestions|reset|wait-for-author|reject> [--expect-head <sha>] [--yes]
+                                   # sets YOUR vote (the PAT's identity); previews unless --yes; read back after the write; 0 clears the vote
   azure-connector pr delete-thread <pr-url> <threadId> [--comment <n>]
   azure-connector pr close-thread  <pr-url> <threadId>
   azure-connector pr timeline      <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas
@@ -2773,6 +2857,7 @@ async function main() {
   checkUnknownFlags(flags);
 
   const [group, sub, arg1, arg2, arg3] = args;
+  checkJsonSupported(flags, group, sub);
 
   if (group === 'config') {
     await cmdConfig(args.slice(1), flags);
@@ -2844,6 +2929,7 @@ async function main() {
     if (sub === 'set-desc')      return cmdPrSetDesc(arg1, arg2, flags, config);
     if (sub === 'abandon')       return cmdPrAbandon(arg1, config, flags);
     if (sub === 'complete')      return cmdPrComplete(arg1, flags, config);
+    if (sub === 'vote')          return cmdPrVote(arg1, arg2, flags, config);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
     if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config, flags);
     if (sub === 'attachments')   return cmdPrAttachments(arg1, config, flags);
@@ -2910,4 +2996,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, normalizeAzureRepoPath, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId };
+module.exports = { parseArgs, normalizeAzureRepoPath, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId, supportsJson, JSON_COMMANDS };

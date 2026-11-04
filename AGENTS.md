@@ -47,7 +47,24 @@ ERROR: Unknown flag(s) — nothing was run:
 
 The accepted flag names are exactly the `KNOWN_FLAGS` set in `index.js` — treat that set as
 the source of truth rather than this document. Passing a flag that some *other* command
-reads is accepted and ignored: validity is global, not per-command.
+reads is accepted and ignored: validity is global, not per-command — with one exception, below.
+
+### 1.2 `--json` on a text-only command aborts the run
+
+`--json` is the one global flag whose silent drop breaks the next step: the caller asked for
+structure, got prose, and either `JSON.parse` fails one call later or a caller that does not
+parse believes it holds the structured output. So `--json` is checked per command against the
+`JSON_COMMANDS` set in `index.js`:
+
+```
+ERROR: --json is not supported by "pr diff" — nothing was run. ...
+```
+
+- Exit **1**, and no request is made. The message lists every command that does emit JSON.
+- Commands that emit JSON: `sprints`, `create-repo`, `repo list|get|refs`,
+  `pr get|list|comments|attachments|attach|timeline`, `wi get|search|missing|relations|updates|attach`,
+  `build list|last`. `JSON_COMMANDS` is the source of truth.
+- `--no-strict-flags` does not relax this one: there is no reading of "prose, but as JSON".
 
 ---
 
@@ -192,6 +209,7 @@ effect the moment it is invoked.**
 | `pr attach` | **yes** | **requires `--yes`**; previews otherwise |
 | `pr abandon`, `pr delete-thread`, `pr close-thread` | **yes** | none |
 | `pr complete` | **yes** | **requires `--yes`**; previews otherwise. Refuses an inactive/draft/conflicting PR, pending policies without `--bypass`/`--auto`, and `--bypass` over a negative vote without `--force` |
+| `pr vote` | **yes** — the PAT identity's vote | **requires `--yes`**; previews otherwise. Refuses an inactive PR and, with `--expect-head`, a moved head; reads the PR back after the write |
 | `wi get|search|fields|field|layout|comments|updates|relations|missing|link` | no | — |
 | `wi set-field` | **yes** | `--dry-run`, `--verify`, and the always-on render guard |
 | `wi set-state` | **yes** | `--dry-run` + always-on rule preflight |
@@ -207,8 +225,9 @@ effect the moment it is invoked.**
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
 
-`build rerun`, `wi create`, `wi attach` and `pr attach` are the only commands that refuse to act without
-`--yes`. Do not assume that convention elsewhere.
+`build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`, `pr attach`, `pr complete`
+and `pr vote` are the only commands that refuse to act without `--yes`. Do not assume that
+convention elsewhere.
 
 ---
 
@@ -407,7 +426,7 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr list <repo-url>` | `--project`, `--repo`, `--status active\|completed\|abandoned\|all` (default `completed`), `--target <branch>`, `--top <n>` (50), `--since <YYYY-MM-DD>`, `--json` | `--since` filters client-side on closed-or-creation date. |
 | `pr create <repo-url\|pullrequestcreate-url>` | `--title` (**required**), `--source`, `--target` (**required**), `--desc`, `--desc-file`, `--body-file`, `--work-items <ids>`, `--draft` | Branches may come from a `pullrequestcreate` URL instead of flags. `--work-items` is a comma list, linked as ArtifactLink. **`--target` has no default** — the repo's default branch is deliberately not used as a fallback, and it is not always `main`. Description is capped at **4000 characters**, validated before the call. **Writes.** |
 | `pr diff <url\|id>` | `--project`, `--repo`, `--full` (alias `--content`), `--patch` (no-op) | Prints the changed-file list, then a unified diff per file. `--full` dumps each changed file's whole contents from the source branch instead. Line numbers in the diff are the right-hand ones `pr comment --line` expects. |
-| `pr comments <url\|id>` | `--project`, `--repo` | Lists active threads with author, date, file location and content. Source of `<threadId>`. |
+| `pr comments <url\|id>` | `--project`, `--repo`, `--json` | Lists active threads with author, date, file location and content. Source of `<threadId>`. `--json` emits `[{id, status, filePath, line, publishedDate, comments: [{id, parentCommentId, author, publishedDate, commentType, content}]}]`; `author` is the display name — the e-mail Azure returns is not copied. Deleted threads/comments are left out; system threads stay. |
 | `pr comment <url\|id>` | `--body-file` (**required**), `--file`, `--line`, `--dry-run`, `--expect-head <sha>`, `--allow-duplicate`, `--no-validate`, `--batch <manifest>` | See §8.3–8.5. Markdown body. `--line` is a right-hand file line number. **Writes.** |
 | `pr reply <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (parent, default 1), `--attach-images`, `--dry-run` | Replies inside an existing thread. **Writes.** |
 | `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1), `--attach-images`, `--dry-run` | Edits in place. **Writes.** |
@@ -416,6 +435,7 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr attach <url\|id> <file>` | `--name <n>`, `--yes`, `--json` | Uploads the file as a PR attachment and prints the url plus a ready `![name](url)` line. **Previews unless `--yes`.** See below. **Writes.** |
 | `pr abandon <url\|id>` | `--project`, `--repo` | Soft close. Branches remain. **Writes, no dry-run.** |
 | `pr complete <url\|id>` | `--strategy noFastForward\|squash\|rebase\|rebaseMerge`, `--delete-source-branch`, `--transition-work-items`, `--message-file`, `--bypass "<reason>"`, `--auto`, `--expect-head`, `--force`, `--yes` | Merges the PR, pinned to the previewed head. Without `--yes` prints votes, blocking policies not approved and the options. `--bypass` needs the branch permission; `--auto` arms auto-complete instead. Work items are **not** transitioned unless asked. **Writes only with `--yes`.** |
+| `pr vote <url\|id> <vote>` | `--expect-head <sha>`, `--yes`, `--project`, `--repo` | `<vote>` is `10`/`approve`, `5`/`approve-with-suggestions`, `0`/`reset`, `-5`/`wait-for-author`, `-10`/`reject`; anything else exits 1. Sets the vote of the PAT's identity (`pat check` shows it), adding it as reviewer if needed. Without `--yes` prints the current and new vote. Refuses an inactive PR and a head that moved past `--expect-head`. The same vote again is a no-op. After the write the PR is read back; a vote Azure did not keep exits 1. **Writes only with `--yes`.** |
 | `pr delete-thread <url\|id> <threadId>` | `--comment <n>` (default 1) | Deletes the comment, then closes the thread. A failed delete is a warning; the close still runs. **Writes, no dry-run.** |
 | `pr close-thread <url\|id> <threadId>` | — | Marks the thread closed. **Writes, no dry-run.** |
 | `pr link <url\|id>` | `--wi <id>`, `--no-wi` | Prints the canonical reference line, with the **project resolved from the PR's own repository object** rather than assumed. Read-only. |
@@ -691,8 +711,8 @@ same numbers.
 ## 11. Operating rules for an autonomous caller
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
-   no `--dry-run`. Only `build rerun`, `wi create`, `wi attach` and `pr attach` refuse to act without
-   confirmation.
+   no `--dry-run`. Only `build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`,
+   `pr attach`, `pr complete` and `pr vote` refuse to act without confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.
 3. **Treat exit 2 as a question, not a failure.** Re-issue with `--field <ref>` or
@@ -727,12 +747,13 @@ same numbers.
 npm test      # or: node --test
 ```
 
-248 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
-two kinds. The transport and comment tests drive the lib against a throwaway `127.0.0.1`
-server on an ephemeral port — the only way to assert that a binary body leaves as bytes,
-and that an error Azure returns *after* storing a comment is reported as stored. The
-`wi create` tests spawn the CLI in dry-run with a non-existent config file and a closed
-base url, so they can never read a real config or reach a real org.
+259 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+two kinds. The transport, comment, `pr attach` and `pr vote` tests drive the lib or the CLI
+against a throwaway `127.0.0.1` server on an ephemeral port — the only way to assert that a
+binary body leaves as bytes, that an error Azure returns *after* storing a comment is reported
+as stored, and that a vote is read back after the write. The `wi create` tests spawn the CLI in
+dry-run with a non-existent config file and a closed base url, so they can never read a real
+config or reach a real org.
 
 | File | Covers |
 |---|---|
@@ -740,6 +761,7 @@ base url, so they can never read a real config or reach a real org.
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/pr-attach.test.js` | `pr attach` and `--attach-images`: name cleaning, the reuse/refuse rule by SHA-1, url forms, error explanations, local-image detection (spaces, `<…>`, `%20`, titles, code left alone), `noRetryStatus` in `request()`, the recovered-after-error upload, and the CLI end to end against a fake Azure on an ephemeral port (preview, upload, re-run, clash, refused names, wrong project, no author e-mail, the 4000-char cap counted with urls). |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
+| `test/pr-vote.test.js` | `pr vote` (vote parsing, blockers for a closed PR and a moved head, preview writes nothing, `--yes` writes once and reads back, a vote Azure did not keep fails), `pr comments --json` (no author e-mail), and the `--json` guard on text-only commands. |
 
 The cases worth knowing are the ones asserting what must **not** count: a same-value
 rewrite is not a state transition, a year-9999 date is no date, a human comment reading

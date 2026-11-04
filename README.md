@@ -346,10 +346,21 @@ take a bare branch or a full `refs/heads/...` ref; if omitted, they are read fro
 #### List PR comment threads
 
 ```bash
-node index.js pr comments <pr-url>
+node index.js pr comments <pr-url|pr-id>
+
+# Machine output: one object per thread — id, status, filePath, line, comments[]
+node index.js pr comments <pr-url|pr-id> --json
 ```
 
-Shows all active threads with author, date, file location (if inline), and content.
+Shows all active threads with author, date, file location (if inline), and content. With
+`--json` each comment carries the author's **display name only**: Azure also returns the
+e-mail, and it is not copied (same rule as `pr attachments --json`). Deleted threads and
+comments are left out in both forms; system threads (votes, pushes) stay, with
+`commentType: "system"`.
+
+> `--json` is refused on commands that only print text (`pr diff`, `wi comments`, `whoami`…):
+> it used to be accepted there and ignored, so the output did not parse. The error lists the
+> commands that do emit JSON.
 
 ---
 
@@ -563,6 +574,35 @@ refuse it. `--expect-head <sha>` checks the head before anything is sent.
 A policy that asks for a vote on the last iteration goes back to pending after any push, even a
 merge of the target branch, while the old votes still show. The preview lists those policies so it
 is clear why a PR with only approvals cannot complete.
+
+---
+
+#### Vote on a pull request
+
+```bash
+# Preview: the PR, your current vote and the one it would set
+node index.js pr vote <pr-url|pr-id> wait-for-author
+
+# Set it — only after reviewing this exact head
+node index.js pr vote <pr-url|pr-id> 5 --expect-head <sha> --yes
+```
+
+Sets **your** vote: the identity of the PAT, the same one `pat check` reports. The vote is a
+number or a name:
+
+| Vote | Name | |
+|---:|---|---|
+| `10` | `approve` | approved |
+| `5` | `approve-with-suggestions` | approved with suggestions |
+| `0` | `reset` | clears your vote — it is not a neutral vote |
+| `-5` | `wait-for-author` | waiting for author |
+| `-10` | `reject` | rejected |
+
+Without `--yes` nothing is written. The command refuses a PR that is not active, and with
+`--expect-head <sha>` it refuses a PR whose head moved after the review, so an approval never
+covers commits nobody read. Voting adds you as a reviewer when you are not on the PR yet. After
+the write it reads the PR back and fails if the vote is not there. Asking for the vote you
+already have changes nothing.
 
 ---
 
@@ -1652,7 +1692,8 @@ azure-connector/
 ├── test/
 │   ├── connector.test.js   # unit tests (node:test)
 │   ├── analytics.test.js   # unit tests for the measurement helpers
-│   └── guardrails.test.js  # unit tests for the pre-write guards
+│   ├── guardrails.test.js  # unit tests for the pre-write guards
+│   └── pr-vote.test.js     # pr vote, pr comments --json, the --json guard
 └── lib/
     ├── config.js     # PAT/org config, URL parser
     ├── api.js        # HTTP transport (no external deps)
@@ -1689,3 +1730,9 @@ same-value rewrite is not a state transition, a year-9999 date is no date, a hum
 detection, head-movement detection, project resolution from an Area path, the canonical link
 lines, and the field-write verifier (fact loss as a multiset, unrenderable markup, and the
 8192-byte truncation signature that makes a fact-loss comparison meaningless).
+
+`pr-vote.test.js` covers `pr vote` and `pr comments --json`: vote parsing (numbers and names,
+everything else refused), the blockers (closed PR, moved head), the comment summary that drops
+the author e-mail, which commands accept `--json`, and the CLI end to end against a fake Azure on
+an ephemeral port — the preview writes nothing, `--yes` writes once and reads the PR back, a vote
+Azure did not keep is a failure, and `--json` on a text-only command is refused before any request.
