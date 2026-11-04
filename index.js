@@ -93,6 +93,23 @@ function normalizeAzureRepoPath(p) {
   return s.startsWith('/') ? s : '/' + s;
 }
 
+// The same MSYS rewrite hits `raw <path>` and `wiki get --page`, where it is worse than a
+// broken anchor: the request goes out as ".../acme/C:/Program Files/Git/..." and Azure answers
+// 400 "potentially dangerous Request.Path value ... (:)", which names neither the shell nor
+// the fix. An API path or a wiki page never starts with a drive letter, so one that does was
+// rewritten: recover it from the Git root, or refuse before any request.
+function demangleMsysArg(value, what) {
+  if (!value || value === true) return value;
+  const s = String(value);
+  if (!/^[A-Za-z]:[\\/]/.test(s)) return s;
+  const fixed = normalizeAzureRepoPath(s);
+  if (typeof fixed === 'string' && fixed !== s && fixed.startsWith('/')) return fixed;
+  throw new Error(
+    `${what} "${s}" looks like a path Git Bash rewrote into a Windows path — nothing was sent. ` +
+    'Re-run with MSYS_NO_PATHCONV=1, drop the leading slash, or run from PowerShell.'
+  );
+}
+
 function parseArgs(argv) {
   const args = [];
   const flags = {};
@@ -2252,10 +2269,11 @@ async function cmdWikiPages(flags, config) {
 async function cmdWikiGet(flags, config) {
   const project = flags.project;
   const wiki = flags.wiki;
-  const page = flags.page;
   if (!project) die('Missing --project <project> argument.');
   if (!wiki) die('Missing --wiki <wikiIdOrName> argument.');
-  if (!page) die('Missing --page <pagePath> argument.');
+  if (!flags.page) die('Missing --page <pagePath> argument.');
+  let page;
+  try { page = demangleMsysArg(flags.page, '--page'); } catch (e) { die(e.message); }
   const org = flags.org || config.org;
   const data = await request(`${config.baseUrl}/${org}/${encodeURIComponent(project)}/_apis/wiki/wikis/${encodeURIComponent(wiki)}/pages?path=${encodeURIComponent(page)}&api-version=7.1&includeContent=true`, { pat: config.pat });
   console.log(`# ${data.path}`);
@@ -2363,6 +2381,9 @@ async function cmdWhoami(config) {
 async function cmdRaw(method, apiPath, body, config) {
   if (!method || method === true) die('Usage: raw <METHOD> <path|url> [json|@file]');
   if (!apiPath || apiPath === true) die('Usage: raw <METHOD> <path|url> [json|@file]');
+  if (!/^https?:\/\//i.test(apiPath)) {
+    try { apiPath = demangleMsysArg(apiPath, 'raw path'); } catch (e) { die(e.message); }
+  }
   const m = String(method).toUpperCase();
   let url = /^https?:\/\//i.test(apiPath)
     ? apiPath
@@ -2996,4 +3017,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, normalizeAzureRepoPath, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId, supportsJson, JSON_COMMANDS };
+module.exports = { parseArgs, normalizeAzureRepoPath, demangleMsysArg, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId, supportsJson, JSON_COMMANDS };

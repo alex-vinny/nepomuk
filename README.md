@@ -257,7 +257,7 @@ node index.js raw PATCH "/Platform/_apis/git/repositories/<repo>" '{"defaultBran
 
 For any endpoint not yet wrapped. A `path` is appended to the org base (`https://dev.azure.com/<org>`); a full `https://` URL is used as-is. `api-version=7.1` is added unless the URL already has one. The body is inline JSON or `@file`. Auth, retry/backoff, and profile selection are shared with every other command.
 
-> From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path before Node sees it. Use a full URL, or run from PowerShell.
+> From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path (`C:/Program Files/Git/Platform/...`) before Node sees it. `raw` undoes that from the Git root (`EXEPATH`); when it cannot, it exits 1 before any request and says so, instead of sending `C:` to Azure (which answers 400 "potentially dangerous Request.Path value"). `wiki get --page` does the same. A full URL, a path without the leading slash, `MSYS_NO_PATHCONV=1` or PowerShell avoid the rewrite altogether.
 
 ---
 
@@ -1719,7 +1719,7 @@ npm test   # or: node --test
 ```
 
 Unit tests (Node built-in `node:test`, no network, no PAT). `connector.test.js` covers `parseArgs`,
-`normalizeAzureRepoPath` (MSYS path de-mangling), `parseUrl`, `buildThreadBody` (inline-anchor
+`normalizeAzureRepoPath` and `demangleMsysArg` (MSYS path de-mangling, `raw` refusal), `parseUrl`, `buildThreadBody` (inline-anchor
 threadContext, right/left side), `markdownToHtml` / `stripHtml`, `loadConfig` profile resolution,
 and the `build` helpers `normalizeBranchRef` / `buildRerunPayload` (generic variable replay, incl.
 pipelines with no variables) / `summarizeBuild`.

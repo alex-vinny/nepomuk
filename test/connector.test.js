@@ -8,7 +8,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { parseArgs, normalizeAzureRepoPath } = require('../index.js');
+const { parseArgs, normalizeAzureRepoPath, demangleMsysArg } = require('../index.js');
 const { parseUrl } = require('../lib/config');
 const { buildThreadBody } = require('../lib/pr');
 const { normalizeBranchRef, buildRerunPayload, summarizeBuild } = require('../lib/build');
@@ -60,6 +60,43 @@ test('normalizeAzureRepoPath: strips the MSYS-prepended Git root', () => {
   } finally {
     if (saved === undefined) delete process.env.EXEPATH; else process.env.EXEPATH = saved;
   }
+});
+
+// ── demangleMsysArg (raw path, wiki --page) ───────────────────────────────────
+function withExePath(value, fn) {
+  const saved = process.env.EXEPATH;
+  if (value === undefined) delete process.env.EXEPATH; else process.env.EXEPATH = value;
+  try { return fn(); } finally {
+    if (saved === undefined) delete process.env.EXEPATH; else process.env.EXEPATH = saved;
+  }
+}
+
+test('demangleMsysArg: a clean API path and a slash-less one pass untouched', () => {
+  assert.strictEqual(demangleMsysArg('/Proj/_apis/git/repositories?$top=1', 'raw path'), '/Proj/_apis/git/repositories?$top=1');
+  assert.strictEqual(demangleMsysArg('Proj/_apis/projects', 'raw path'), 'Proj/_apis/projects');
+});
+
+test('demangleMsysArg: the Git root MSYS prepended is stripped, query string kept', () => {
+  withExePath('C:\\Program Files\\Git\\bin', () => {
+    assert.strictEqual(
+      demangleMsysArg('C:/Program Files/Git/Proj/_apis/git/pullrequests/7?api-version=7.1', 'raw path'),
+      '/Proj/_apis/git/pullrequests/7?api-version=7.1'
+    );
+  });
+});
+
+test('demangleMsysArg: an unrecoverable drive path is refused with the fix, not sent', () => {
+  withExePath(undefined, () => {
+    assert.throws(
+      () => demangleMsysArg('C:/Program Files/Git/Wiki/Page', '--page'),
+      /--page "C:\/Program Files\/Git\/Wiki\/Page" looks like a path Git Bash rewrote.*MSYS_NO_PATHCONV=1/
+    );
+  });
+});
+
+test('demangleMsysArg: a valueless flag and an empty value pass through', () => {
+  assert.strictEqual(demangleMsysArg(true, '--page'), true);
+  assert.strictEqual(demangleMsysArg(undefined, '--page'), undefined);
 });
 
 test('normalizeAzureRepoPath: null/true short-circuit', () => {
@@ -1031,6 +1068,19 @@ function runCli(args) {
   fs.rmSync(dir, { recursive: true, force: true });
   return res;
 }
+
+test('raw: a path Git Bash rewrote and that cannot be recovered exits 1 before any request', () => {
+  const saved = process.env.EXEPATH;
+  delete process.env.EXEPATH;
+  try {
+    const res = runCli(() => ['raw', 'GET', 'C:/Program Files/Git/Proj/_apis/projects']);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /raw path .* looks like a path Git Bash rewrote/);
+    assert.doesNotMatch(res.stderr, /ECONNREFUSED|fetch failed/, 'refused before the request, not by the closed port');
+  } finally {
+    if (saved !== undefined) process.env.EXEPATH = saved;
+  }
+});
 
 test('wi create: without --yes prints the plan and creates nothing', () => {
   const res = runCli((dir) => {

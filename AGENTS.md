@@ -407,7 +407,9 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `raw <METHOD> <path\|url> [<json>\|@<file>]` | Any endpoint not yet wrapped. A `path` is appended to the org base; a full `https://` URL is used as-is. `api-version=7.1` is added unless already present. Body is inline JSON or `@file`. Shares auth, retry and profile selection with every other command. **Writes if the method writes.** |
 
 > From Git Bash (MSYS) a leading-slash path is rewritten to a Windows path before Node
-> sees it. Pass a full URL, or run from PowerShell.
+> sees it. `raw` strips the Git root (`EXEPATH`) back off; when it cannot, it exits **1**
+> before any request (nothing is sent) and names the fix. A full URL, a slash-less path,
+> `MSYS_NO_PATHCONV=1` or PowerShell avoid the rewrite.
 
 ### 9.3 Repositories
 
@@ -660,8 +662,9 @@ silently dropped.
 | `wiki pages` | `--project`, `--wiki <idOrName>` (both **required**), `--org` |
 | `wiki get` | `--project`, `--wiki`, `--page <path>` (all **required**), `--org` — prints the page as Markdown |
 
-> In Git Bash, export `MSYS_NO_PATHCONV=1` or a `--page "/A/B"` value is rewritten into a
-> Windows path before Node sees it.
+> In Git Bash a `--page "/A/B"` value is rewritten into a Windows path before Node sees it.
+> `wiki get` recovers it from the Git root, or exits **1** before the request; exporting
+> `MSYS_NO_PATHCONV=1` avoids the rewrite.
 
 ---
 
@@ -747,7 +750,7 @@ same numbers.
 npm test      # or: node --test
 ```
 
-259 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+268 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
 two kinds. The transport, comment, `pr attach` and `pr vote` tests drive the lib or the CLI
 against a throwaway `127.0.0.1` server on an ephemeral port — the only way to assert that a
 binary body leaves as bytes, that an error Azure returns *after* storing a comment is reported
@@ -757,7 +760,7 @@ config or reach a real org.
 
 | File | Covers |
 |---|---|
-| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` (MSYS de-mangling), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
+| `test/connector.test.js` | `parseArgs`, `normalizeAzureRepoPath` and `demangleMsysArg` (MSYS de-mangling of `--file`, `raw` paths and `--page`), `parseUrl`, `buildThreadBody` anchors, both Markdown profiles (including nested lists), the render guard, comment image inlining and the 65,536-character cap, the stored-anyway check on `addComment`/`editComment`, `wi create` dry-run, `loadConfig` profile resolution, the `build` helpers, the `wi attach` guards (`attachmentUploadUrl`, `attachmentRelation`, `checkAttachment`), and the binary/JSON body split in `request()`. |
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/pr-attach.test.js` | `pr attach` and `--attach-images`: name cleaning, the reuse/refuse rule by SHA-1, url forms, error explanations, local-image detection (spaces, `<…>`, `%20`, titles, code left alone), `noRetryStatus` in `request()`, the recovered-after-error upload, and the CLI end to end against a fake Azure on an ephemeral port (preview, upload, re-run, clash, refused names, wrong project, no author e-mail, the 4000-char cap counted with urls). |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
