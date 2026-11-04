@@ -824,6 +824,11 @@ node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a fie
 > *different* profile from the one `wi comment` uses (which keeps a styled `<table>` — the
 > discussion pane renders that fine). Same source, two surfaces, two outputs.
 >
+> **Links:** `[text](https://…)` becomes `<a href>` (in both profiles), and an inline
+> `<a href="https://…">text</a>` written in the Markdown is kept as a tag instead of being escaped
+> into visible text. Only `http(s)` and `mailto` targets become links; anything else stays as text
+> and the guard below reports it. A link written inside a code span stays literal.
+>
 > **A multi-line field write that still carries raw Markdown is refused**, before the request is
 > sent and before a `--dry-run` preview claims success. The check runs in `lib/workitem.js`
 > (`assertRenderableFieldValue`), not in the CLI, so a one-off script calling `setField` /

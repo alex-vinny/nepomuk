@@ -227,6 +227,38 @@ test('markdownToHtml: drops the opening-fence info string', () => {
   assert.ok(html.includes('foo();'));
 });
 
+// ── links ─────────────────────────────────────────────────────────────────────
+const SETUP = 'https://setup.example.com/?route=registerManager%3AversionRegister%3Aedit-d2b4';
+
+test('markdownToFieldHtml: a markdown link becomes an anchor, in a list item too', () => {
+  const html = markdownToFieldHtml(`- **ELBR:** [6.1.48-prd-el](${SETUP})\n- ver [o PR](https://x/pr/1).`);
+  assert.ok(html.includes(`<a href="${SETUP}">6.1.48-prd-el</a>`), html);
+  assert.ok(html.includes('<a href="https://x/pr/1">o PR</a>.'));
+  assert.ok(!/LINK\d/.test(html), 'no leftover placeholder');
+  assert.doesNotThrow(() => assertRenderableFieldValue(html), 'the write guard accepts it');
+});
+
+test('markdownToFieldHtml: inline code inside the link text renders as code', () => {
+  const html = markdownToFieldHtml(`[\`6.1.48-prd-el\`](${SETUP})`);
+  assert.ok(html.includes(`<a href="${SETUP}"><code>6.1.48-prd-el</code></a>`), html);
+});
+
+test('markdownToFieldHtml: an inline <a href> is kept as a tag, not escaped', () => {
+  const html = markdownToFieldHtml(`- veja <a href="${SETUP}">a versão</a> antes`);
+  assert.ok(html.includes(`<a href="${SETUP}">a versão</a> antes`), html);
+  assert.ok(!html.includes('&lt;a'), 'the tag is not escaped into visible text');
+});
+
+test('markdownToHtml: only http(s)/mailto links; a code span example stays literal', () => {
+  const js = markdownToHtml('[x](javascript:alert(1))');
+  assert.ok(!js.includes('<a '), 'no anchor for a javascript: target');
+  const ex = markdownToHtml('use `[texto](url)` no corpo');
+  assert.ok(ex.includes('<code>[texto](url)</code>'), ex);
+  assert.ok(!ex.includes('<a '));
+  const label = markdownToHtml('[a <b>x</b>](https://x/1)');
+  assert.ok(label.includes('<a href="https://x/1">a &lt;b&gt;x&lt;/b&gt;</a>'), 'link text is escaped');
+});
+
 // ── loadConfig profile resolution ─────────────────────────────────────────────
 const fs = require('node:fs');
 const os = require('node:os');
