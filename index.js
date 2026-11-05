@@ -24,6 +24,7 @@
  *   wi edit-comment <wi-url> <commentId> --body-file <path>   Edit a comment in place (Markdown file)
  *   wi delete-comment <wi-url> <commentId>   Delete a work item comment (get id via `wi comments --ids`)
  *   wi set-state <wi-url> <state>  Change a work item's state (System.State)
+ *   wi complete <wi-url> --hours <n> [--state "Done"] [--assignee <email>] [--dry-run]  Record the work; close only with --state
  *   wi link-pr  <wi-url> <pr-url>  Link an existing pull request to a work item
  *   wi add-link <wi> <target> [--type related|parent|child|…] [--yes]  Link two work items (dry-run unless --yes)
  *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>] [--yes]  One Task (previews unless --yes)
@@ -2039,26 +2040,58 @@ async function cmdWiSetEstimate(rawUrl, hoursStr, config, flags) {
 // `wi complete` — the closing move that `set-estimate` is not. set-estimate opens a
 // task (OriginalEstimate + RemainingWork) and never writes CompletedWork. A board that
 // gates `Done` on CompletedWork rejects the transition until this runs.
+// Without --state it records the hours only and the state is left as it was: on
+// 2026-11-05 a run read as "closed" (the usage line said so) and the task stayed open.
+// With --state the hours, the assignee and the state go in one PATCH, preflighted.
 async function cmdWiComplete(rawUrl, flags, config) {
   const raw = (flags.hours != null && flags.hours !== true) ? flags.hours : null;
   if (raw == null) {
-    die('Missing --hours. Usage: wi complete <wi-url|id> --hours <n>\n'
+    die('Missing --hours. Usage: wi complete <wi-url|id> --hours <n> [--state "Done"] [--assignee <email>]\n'
       + 'Use --hours 0 when the task was closed without delivery — the record should not claim work that did not happen.');
   }
-  const hours = parseFloat(raw);
-  if (isNaN(hours) || hours < 0) die(`Invalid --hours: ${raw}`);
+  if (flags.state === true) die('--state needs a value, e.g. --state "Done".');
+  if (flags.assignee === true) die('--assignee needs a value (the e-mail of the person).');
+  const state = flagValue(flags.state);
+  const assignee = flagValue(flags.assignee);
+  let ops;
+  try { ops = tasks.completeOps({ hours: parseFloat(raw), state, assignee }); }
+  catch { die(`Invalid --hours: ${raw}`); }
+  const hours = ops[0].value;
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
-  const ops = [
-    { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.CompletedWork', value: hours },
-    { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.RemainingWork', value: 0 },
-  ];
+  let remaining = 'RemainingWork = 0';
+
+  if (state && !flags['no-preflight']) {
+    try {
+      await wi.validateUpdate({ config, ...p, ops });
+    } catch (first) {
+      let e = first;
+      // Task already in a state where the process keeps RemainingWork empty: send no value.
+      if (tasks.onlyRemainingWorkMustBeEmpty(first && first.message)) {
+        ops = ops.filter((o) => !o.path.endsWith('/Microsoft.VSTS.Scheduling.RemainingWork'));
+        remaining = `RemainingWork left empty (the board keeps it empty in "${state}")`;
+        try { await wi.validateUpdate({ config, ...p, ops }); e = null; } catch (again) { e = again; }
+      }
+      if (e) {
+        await explainStateRejection({ config, p, state, error: e, flags });
+        if (!assignee && tasks.rejectsMissingAssignee(e && e.message)) {
+          console.error(`\nThis board needs someone on the task to reach "${state}": add --assignee <email>.`);
+        }
+        return;
+      }
+    }
+  }
+  const what = `CompletedWork = ${hours}h, ${remaining}`
+    + (assignee ? `, AssignedTo = ${assignee}` : '')
+    + (state ? `, State = "${state}"` : '');
   if (flags['dry-run']) {
-    console.log(`DRY RUN — nothing written to #${p.id}.`);
-    console.log(`Would set CompletedWork = ${hours}, RemainingWork = 0.`);
+    console.log(`DRY RUN — nothing written to #${p.id}${state && !flags['no-preflight'] ? ' (validated by the board)' : ''}.`);
+    console.log(`Would set ${what}.`);
+    if (!state) console.log('State would stay as it is — add --state "Done" to close the task.');
     return;
   }
   await wi.updateWorkItem({ config, ...p, ops });
-  console.log(`Work item #${p.id}: CompletedWork = ${hours}h, RemainingWork = 0.`);
+  console.log(`Work item #${p.id}: ${what}.`);
+  if (!state) console.error('note: state unchanged — this recorded the hours only. Add --state "Done" (or run wi set-state) to close the task.');
 }
 
 // `wi missing` — which fields the form declares but the item does not answer.
@@ -2793,7 +2826,7 @@ Usage:
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
   azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"
   azure-connector wi set-estimate <wi-url> <hours> [--dry-run]   # opens a task: OriginalEstimate + RemainingWork (never CompletedWork)
-  azure-connector wi complete    <wi-url> --hours <n> [--dry-run] # closes a task: CompletedWork = n, RemainingWork = 0
+  azure-connector wi complete    <wi-url> --hours <n> [--state "Done"] [--assignee <email>] [--dry-run] # CompletedWork = n, RemainingWork = 0; the state changes only with --state (one PATCH, preflighted)
   azure-connector wi link-pr    <wi-url> <pr-url>           # link an existing PR to the work item
   azure-connector wi add-link    <wi-url|id> <target-url|id> [--type related|parent|child|predecessor|successor|duplicate|duplicate-of] [--comment "<t>"] [--yes]
                                  # link two work items (default: related); skips an existing identical link; dry-run unless --yes

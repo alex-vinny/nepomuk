@@ -1218,8 +1218,8 @@ never exposed on the command line (inline PATs get blocked as credential leaks).
 
 > ⚠️ **This is the *opening* move, not the closing one.** `set-estimate` writes
 > `OriginalEstimate` + `RemainingWork` — it never touches `CompletedWork`, despite a name that
-> reads like it might. To **close** a task use `wi complete <wi-url|id> --hours N`, which sets
-> `CompletedWork = N` and `RemainingWork = 0`. Boards that require `CompletedWork` to reach
+> reads like it might. To **close** a task use `wi complete <wi-url|id> --hours N --state "Done"`, which sets
+> `CompletedWork = N`, `RemainingWork = 0` and the state in one PATCH. Boards that require `CompletedWork` to reach
 > `Done` (`Task`, and `Bug Task`) will reject the transition if you only ran `set-estimate`.
 
 ---
@@ -1227,13 +1227,22 @@ never exposed on the command line (inline PATs get blocked as credential leaks).
 #### `wi complete` — close a task with the work it took
 
 ```bash
-node index.js wi complete <wi-url|id> --hours 6
-node index.js wi complete <wi-url|id> --hours 6 --dry-run
+node index.js wi complete <wi-url|id> --hours 6                          # hours only, state unchanged
+node index.js wi complete <wi-url|id> --hours 6 --state "Done"           # hours and state, one PATCH
+node index.js wi complete <wi-url|id> --hours 6 --state "Done" --assignee someone@example.com
+node index.js wi complete <wi-url|id> --hours 6 --state "Done" --dry-run # validated by the board, nothing written
 ```
 
 Sets `CompletedWork = n` and `RemainingWork = 0` — the closing move to `set-estimate`'s
 opening one. A board that gates `Done` on `CompletedWork` rejects the transition until this
 has run.
+
+**The state moves only with `--state`.** Without it the command records the hours and the
+task stays in its current state; stderr says so. With `--state`, the hours, the optional
+`--assignee` and the state are sent in **one** PATCH after the same rule preflight as
+`wi set-state` — two calls would leave the hours written and the state refused. Some boards
+refuse `Done` on a Task with nobody assigned (`TF401320`, Assigned To); the rejection then
+names `--assignee`. `--dry-run` with `--state` asks the board to validate and writes nothing.
 
 > Pass `--hours 0` when the task was closed without delivery. The record should not claim
 > work that did not happen.
