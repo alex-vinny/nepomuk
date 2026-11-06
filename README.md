@@ -517,6 +517,10 @@ node index.js pr set-desc <pr-url> --body-file ./pr-body.md
 
 # Inline text, and/or rename the PR
 node index.js pr set-desc <pr-url> "New description" --title "[BUG 1234] New title"
+
+# Change the target branch (short name or refs/heads/...). The branch must exist in the
+# PR's repo; otherwise nothing is updated. --dry-run checks it and prints the new target.
+node index.js pr set-desc <pr-url> --target releases/rc/2026xx_hf --dry-run
 ```
 
 PATCHes the live PR. Use it to **sync a PR description after later commits change the

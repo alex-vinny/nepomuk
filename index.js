@@ -1027,8 +1027,13 @@ async function cmdPrSetDesc(rawUrl, text, flags, config) {
     catch (e) { die(`Could not read --body-file "${flags['body-file']}": ${e.message}`); }
   }
   const newTitle = (flags.title && flags.title !== true) ? flags.title : null;
-  if (description == null && newTitle == null) {
-    die('Nothing to update. Provide new description text inline, via --body-file <path>, and/or --title "<text>".');
+  const newTarget = flags.target !== undefined ? pr.targetBranchName(flags.target) : null;
+  if (flags.target !== undefined && !newTarget) die('--target needs a branch name, e.g. --target releases/rc/x.');
+  if (description == null && newTitle == null && newTarget == null) {
+    die('Nothing to update. Provide new description text inline, via --body-file <path>, --title "<text>" and/or --target <branch>.');
+  }
+  if (newTarget && !(await pr.getRef({ config, ...p, branch: newTarget }))) {
+    die(`Target branch "${newTarget}" does not exist in ${p.repo}. Nothing was updated.`);
   }
 
   // Azure DevOps limits the PR description to 4000 characters (API returns HTTP 400 otherwise).
@@ -1048,6 +1053,7 @@ async function cmdPrSetDesc(rawUrl, text, flags, config) {
   if (flags['dry-run']) {
     console.log('DRY RUN — nothing updated.');
     if (newTitle) console.log(`Title: ${newTitle}`);
+    if (newTarget) console.log(`Target: refs/heads/${newTarget}`);
     if (images) printImagePlan(images);
     if (measured != null) console.log(`Description (${measured.length} chars):\n${measured}`);
     return;
@@ -1060,8 +1066,10 @@ async function cmdPrSetDesc(rawUrl, text, flags, config) {
         + 're-run: identical files are reused, not uploaded again.');
     }
   }
-  await postAfterImages(images, () => pr.updatePullRequest({ config, ...p, title: newTitle, description }));
-  console.log(`PR #${p.prId} updated${newTitle ? ' (title)' : ''}${description != null ? ' (description)' : ''}.`);
+  const targetRefName = newTarget ? `refs/heads/${newTarget}` : null;
+  await postAfterImages(images, () => pr.updatePullRequest({ config, ...p, title: newTitle, description, targetRefName }));
+  console.log(`PR #${p.prId} updated${newTitle ? ' (title)' : ''}${description != null ? ' (description)' : ''}`
+    + `${newTarget ? ` (target ${targetRefName})` : ''}.`);
 }
 
 async function cmdPrDeleteThread(rawUrl, threadIdStr, flags, config) {
@@ -2796,7 +2804,7 @@ Usage:
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
   azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
   azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
-  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"] [--attach-images] [--dry-run]   # update PR description/title in place
+  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"] [--target <branch>] [--attach-images] [--dry-run]   # update PR description/title/target branch in place (target must exist)
                                    # --attach-images: a body with ![alt](./local.png) uploads each image to the PR and links it;
                                    # without the flag such a body is refused (Azure would show a broken image)
   azure-connector pr attachments   <pr-url|pr-id> [--json]                          # list PR attachments (name, date, author, url)
