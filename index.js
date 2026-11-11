@@ -146,7 +146,7 @@ function parseArgs(argv) {
 // hatch for a genuinely unattended pipeline.
 const KNOWN_FLAGS = new Set([
   'activity', 'all', 'all-fields', 'allow-duplicate', 'allow-empty', 'area', 'as-comment', 'assignee', 'attach-images',
-  'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
+  'base-file', 'base-url', 'body-file', 'branch', 'comment', 'content', 'current', 'definition', 'depth',
   'desc', 'desc-file', 'draft', 'dry-run', 'entered', 'estimate', 'expect-head', 'field',
   'fields', 'file', 'filter', 'force', 'from-markdown', 'full', 'h', 'help', 'hours', 'ids', 'iteration', 'json', 'line',
   'name', 'no-preflight', 'no-resolve', 'no-type', 'no-validate', 'no-wi', 'org', 'out', 'page', 'parent', 'pat',
@@ -1020,6 +1020,30 @@ async function cmdWiLink(rawUrl, flags, config) {
   }
 }
 
+/**
+ * --base-file: the description this edit was built from. Another session (or a person) may have
+ * changed the PR description after it was read; writing on top of a stale copy silently undoes that
+ * change (2026-11-11, PR 25827: a parallel edit to the last line was reverted). Compares the live
+ * description with the base, ignoring CRLF and trailing whitespace, and stops before any write.
+ */
+async function refuseIfDescriptionMoved(baseFile, description, config, p) {
+  if (baseFile === true || baseFile === '') die('--base-file needs the path of the description you started from.');
+  if (description == null) die('--base-file guards a description change: pass the new text with --body-file.');
+  let base;
+  try { base = require('fs').readFileSync(baseFile, 'utf8'); }
+  catch (e) { die(`Could not read --base-file "${baseFile}": ${e.message}`); }
+  const norm = (s) => String(s || '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+  const live = norm((await pr.getPullRequest({ config, ...p })).description);
+  if (live === norm(base)) return;
+  const a = live.split('\n');
+  const b = norm(base).split('\n');
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  die(`PR #${p.prId} description changed since --base-file was read (first difference at line ${i + 1}):\n`
+    + `  base: ${b[i] === undefined ? '(end)' : b[i]}\n  live: ${a[i] === undefined ? '(end)' : a[i]}\n`
+    + 'Re-read it (pr get --json), apply your change on top and re-run. Nothing was updated.');
+}
+
 async function cmdPrSetDesc(rawUrl, text, flags, config) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   let description = (text && text !== true) ? unescapeDescription(text) : null;
@@ -1036,6 +1060,7 @@ async function cmdPrSetDesc(rawUrl, text, flags, config) {
   if (newTarget && !(await pr.getRef({ config, ...p, branch: newTarget }))) {
     die(`Target branch "${newTarget}" does not exist in ${p.repo}. Nothing was updated.`);
   }
+  if (flags['base-file'] !== undefined) await refuseIfDescriptionMoved(flags['base-file'], description, config, p);
 
   // Azure DevOps limits the PR description to 4000 characters (API returns HTTP 400 otherwise).
   // With images the limit is checked on the rewritten text, before anything is uploaded:
@@ -2871,7 +2896,7 @@ Usage:
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
   azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
   azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
-  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--title "<text>"] [--target <branch>] [--attach-images] [--dry-run]   # update PR description/title/target branch in place (target must exist)
+  azure-connector pr set-desc      <pr-url> [--body-file <path>] [--base-file <path>] [--title "<text>"] [--target <branch>] [--attach-images] [--dry-run]   # update PR description/title/target branch in place (target must exist; --base-file = the description you edited, refused if the live one moved)
                                    # --attach-images: a body with ![alt](./local.png) uploads each image to the PR and links it;
                                    # without the flag such a body is refused (Azure would show a broken image)
   azure-connector pr attachments   <pr-url|pr-id> [--json]                          # list PR attachments (name, date, author, url)
