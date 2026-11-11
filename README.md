@@ -1171,6 +1171,10 @@ that only meant to check left a Task behind).
 Creates a `Task` linked as a child (`System.LinkTypes.Hierarchy-Reverse`) of the
 parent work item (PBI/Bug). The new Task **inherits the parent's Area Path,
 Iteration Path, and Assignee** unless `--assignee` overrides it.
+The Task is created in the **parent's own project** (`System.TeamProject`), also for a bare
+id: until 2026-11-11 a bare id created it in the configured default project (`create-tasks` too),
+which put the child in another project or failed with an Activity "not in the list of supported
+values" from that project's process.
 
 - `--estimate <hours>` sets both `OriginalEstimate` and `RemainingWork` (hours).
 - `--desc "<text>"` sets `System.Description`.

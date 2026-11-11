@@ -57,3 +57,11 @@ test('parsePlan: a plan without this parent, or empty, is refused', () => {
 test('totalHours: sums only the estimates that were given', () => {
   assert.strictEqual(totalHours([{ hours: 6 }, { hours: null }, { hours: 2.5 }]), 8.5);
 });
+
+test('taskProject: the parent project wins over the default a bare id resolved against', () => {
+  const { taskProject } = require('../lib/tasks');
+  assert.strictEqual(taskProject('Proj', { 'System.TeamProject': 'Board' }), 'Board');
+  assert.strictEqual(taskProject('Board', { 'System.TeamProject': 'Board' }), 'Board');
+  assert.strictEqual(taskProject('Proj', {}), 'Proj');
+  assert.strictEqual(taskProject('Proj'), 'Proj');
+});

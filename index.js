@@ -1934,13 +1934,14 @@ async function cmdWiCreate(flags, config) {
 
 const flagValue = v => (v != null && v !== true ? v : undefined);
 
-function printTaskPreview(parentId, list) {
+function printTaskPreview(parentId, list, project) {
   for (const { title, fields } of list) {
     const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
     const who = fields['System.AssignedTo'] || '(nobody)';
     console.log(`  · ${title}  —  ${est != null ? `${est}h` : 'no estimate'} · ${fields['Microsoft.VSTS.Common.Activity']} · ${who}`);
   }
   console.log(`  parent     : #${parentId}`);
+  if (project) console.log(`  project    : ${project}`);
 }
 
 /**
@@ -1953,6 +1954,8 @@ async function cmdWiCreateTask(rawParentUrl, title, flags, config) {
 
   // Inherit Area/Iteration (and assignee, unless overridden) from the parent work item.
   const parentWi = await wi.getWorkItem({ config, ...parent });
+  // The Task goes in the parent's project, not the default a bare id resolved against.
+  const project = tasks.taskProject(parent.project, parentWi.fields);
   let fields;
   try {
     fields = tasks.taskFields({
@@ -1963,12 +1966,12 @@ async function cmdWiCreateTask(rawParentUrl, title, flags, config) {
 
   if (!flags.yes) {
     console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
-    printTaskPreview(parent.id, [{ title: fields['System.Title'], fields }]);
+    printTaskPreview(parent.id, [{ title: fields['System.Title'], fields }], project);
     return;
   }
 
   const result = await wi.createWorkItem({
-    config, org: parent.org, project: parent.project, type: 'Task', fields, parentId: parent.id,
+    config, org: parent.org, project, type: 'Task', fields, parentId: parent.id,
   });
   const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
   console.log(`Created Task #${result.id}: ${fields['System.Title']}${est != null ? ` (${est}h)` : ''} — child of #${parent.id}`);
@@ -1992,6 +1995,8 @@ async function cmdWiCreateTasks(rawParentUrl, flags, config) {
 
   const parentWi = await wi.getWorkItem({ config, ...parent });
   const pf = parentWi.fields || {};
+  // The Tasks go in the parent's project, not the default a bare id resolved against.
+  const project = tasks.taskProject(parent.project, pf);
   let resolved;
   try {
     resolved = list.map(t => ({
@@ -2007,7 +2012,7 @@ async function cmdWiCreateTasks(rawParentUrl, flags, config) {
   console.log(`${resolved.length} task(s), ${tasks.totalHours(list)}h, under #${parent.id} — ${pf['System.Title'] || ''}`);
   if (!flags.yes) {
     console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
-    printTaskPreview(parent.id, resolved);
+    printTaskPreview(parent.id, resolved, project);
     return;
   }
 
@@ -2015,7 +2020,7 @@ async function cmdWiCreateTasks(rawParentUrl, flags, config) {
   for (const { title, fields } of resolved) {
     try {
       const result = await wi.createWorkItem({
-        config, org: parent.org, project: parent.project, type: 'Task', fields, parentId: parent.id,
+        config, org: parent.org, project, type: 'Task', fields, parentId: parent.id,
       });
       created.push(result.id);
       const est = fields['Microsoft.VSTS.Scheduling.OriginalEstimate'];
