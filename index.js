@@ -27,6 +27,8 @@
  *   wi complete <wi-url> --hours <n> [--state "Done"] [--assignee <email>] [--dry-run]  Record the work; close only with --state
  *   wi link-pr  <wi-url> <pr-url>  Link an existing pull request to a work item
  *   wi add-link <wi> <target> [--type related|parent|child|…] [--yes]  Link two work items (dry-run unless --yes)
+ *   wi relink   <wi> <target> --to <type> [--type <current>] [--yes]  Turn one link into another type (dry-run unless --yes)
+ *   wi unlink   <wi> <target> [--type <current>] [--yes]  Remove one link between two work items (dry-run unless --yes)
  *   wi create-task <parent-url> <title> [--estimate <h>] [--desc <t>] [--assignee <email>] [--yes]  One Task (previews unless --yes)
  *   wi create-tasks <parent-url> --plan <file.json> [--assignee <email>] [--yes]  Tasks of a plan file (previews unless --yes)
  *   wi attachments <wi-url>        List attachments
@@ -51,6 +53,7 @@ const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
 const tasks = require('./lib/tasks');
 const relations = require('./lib/relations');
+const hierarchy = require('./lib/hierarchy');
 const fmt = require('./lib/format');
 const build = require('./lib/build');
 // Suffixed: `repo` and `iteration` are already local variable names in several
@@ -155,6 +158,7 @@ const KNOWN_FLAGS = new Set([
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes', 'plan',
   'against', 'batch', 'verify', 'no-strict-flags',
   'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
+  'allow-same-level', 'to', 'content-type',
 ]);
 
 /**
@@ -1862,6 +1866,7 @@ async function cmdWiAddLink(rawFrom, rawTo, flags, config) {
   try {
     result = await relations.addLink({
       config, org: from.org, id: from.id, targetId: to.id, type, comment, dryRun: !flags.yes,
+      allowSameLevel: !!flags['allow-same-level'], team: flagValue(flags.team),
     });
   } catch (e) {
     die(e.message);
@@ -1877,6 +1882,48 @@ async function cmdWiAddLink(rawFrom, rawTo, flags, config) {
     return;
   }
   console.log(`Linked #${from.id} --${type}--> #${to.id}.`);
+}
+
+/**
+ * `wi relink` / `wi unlink` — change or remove ONE link between two work items, in one
+ * all-or-nothing PATCH pinned to the revision that was read. `--type` picks the current link
+ * when there is more than one; `--to` is the new type (relink only). Dry-run unless --yes.
+ */
+async function cmdWiReplaceLink(mode, rawFrom, rawTo, flags, config) {
+  const usage = mode === 'relink'
+    ? 'Usage: wi relink <wi-url|id> <target-url|id> --to <related|parent|child|…> [--type <current>] [--comment "<t>"] [--yes]'
+    : 'Usage: wi unlink <wi-url|id> <target-url|id> [--type <current>] [--yes]';
+  if (!rawFrom || rawFrom === true || !rawTo || rawTo === true) die(usage);
+  const newType = flagValue(flags.to);
+  if (mode === 'relink' && !newType) die(`Missing --to. ${usage}`);
+  if (mode === 'unlink' && flags.to !== undefined) die(`--to is for wi relink. ${usage}`);
+  const from = workItemRef(rawFrom, config, flags);
+  const to = workItemRef(rawTo, config, flags);
+  const comment = flagValue(flags.comment);
+
+  let result;
+  try {
+    result = await relations.replaceLink({
+      config, org: from.org, id: from.id, targetId: to.id, type: flagValue(flags.type), newType, comment,
+      dryRun: !flags.yes, allowSameLevel: !!flags['allow-same-level'], team: flagValue(flags.team),
+    });
+  } catch (e) {
+    die(e.message);
+  }
+
+  const fromName = relations.linkName(result.from);
+  const toName = result.to ? relations.linkName(result.to) : null;
+  if (result.status === 'same') {
+    console.log(`#${from.id} already has a ${toName} link to #${to.id} — nothing to do.`);
+    return;
+  }
+  const what = toName ? `#${from.id} --${fromName}--> #${to.id}  becomes  --${toName}-->` : `#${from.id} --${fromName}--> #${to.id}  removed`;
+  if (result.status === 'planned') {
+    console.log(`DRY RUN — nothing was written. Re-run with --yes to ${mode}.\n`);
+    console.log(`  ${what}${comment && toName ? `  comment: ${comment}` : ''}`);
+    return;
+  }
+  console.log(toName ? `Relinked #${from.id} --${toName}--> #${to.id} (was ${fromName}).` : `Unlinked #${from.id} from #${to.id} (was ${fromName}).`);
 }
 
 async function cmdWiLinkPr(rawWiUrl, rawPrUrl, config, flags) {
@@ -1933,6 +1980,9 @@ async function cmdWiCreate(flags, config) {
   // Same order as set-field: the render guard runs before the dry-run print, so a preview
   // is a preview of a create that would actually succeed — not one the lib then refuses.
   for (const [ref, value] of Object.entries(fields)) wi.assertRenderableFieldValue(ref, value, { force: !!flags.force });
+  // The hierarchy guard too: a Bug under a Product Backlog Item is created without error and
+  // then hides both from the backlog, so it is refused here, preview included.
+  const parentInfo = parentId ? await guardParentLink({ config, org, parentId, childType: type, childProject: project, flags }) : null;
 
   if (!flags.yes) {
     console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
@@ -1945,7 +1995,7 @@ async function cmdWiCreate(flags, config) {
       const shown = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 120)}… (${v.length} chars)` : v;
       console.log(`  ${k.padEnd(11)}: ${String(shown).replace(/\n/g, ' ')}`);
     }
-    if (parentId) console.log(`  parent     : #${parentId}`);
+    if (parentId) console.log(`  parent     : #${parentId}${parentInfo && parentInfo.type ? ` (${parentInfo.type})` : ''}`);
     return;
   }
 
@@ -1958,6 +2008,29 @@ async function cmdWiCreate(flags, config) {
 }
 
 const flagValue = v => (v != null && v !== true ? v : undefined);
+
+/**
+ * Refuses (exit 1) a new child whose type sits on the same backlog level as its parent —
+ * see lib/hierarchy.js. `parent` may be passed when the caller already read it.
+ * Returns the parent's { id, type, project }; skipped (null) with --allow-same-level.
+ */
+function taskParent(id, parentWi, project) {
+  const f = (parentWi && parentWi.fields) || {};
+  return { id: Number(id), type: f['System.WorkItemType'], project: f['System.TeamProject'] || project };
+}
+
+async function guardParentLink({ config, org, parentId, parent, childType, childProject, flags }) {
+  if (flags['allow-same-level']) return parent || null;
+  try {
+    const p = parent || await hierarchy.getTypeAndProject({ config, org, id: parentId });
+    await hierarchy.assertHierarchyAllowed({
+      config, org, parent: p, child: { type: childType, project: childProject || p.project }, team: flagValue(flags.team),
+    });
+    return p;
+  } catch (e) {
+    die(e.message);
+  }
+}
 
 function printTaskPreview(parentId, list, project) {
   for (const { title, fields } of list) {
@@ -1988,6 +2061,10 @@ async function cmdWiCreateTask(rawParentUrl, title, flags, config) {
       activity: flagValue(flags.activity), assignee: flagValue(flags.assignee),
     }, parentWi.fields || {});
   } catch (e) { die(e.message); }
+  // A Task under a Task-level item (Bug Task, another Task) is a same-level hierarchy.
+  await guardParentLink({
+    config, org: parent.org, parent: taskParent(parent.id, parentWi, project), childType: 'Task', childProject: project, flags,
+  });
 
   if (!flags.yes) {
     console.log('DRY RUN — nothing was created. Re-run with --yes to create.\n');
@@ -2033,6 +2110,9 @@ async function cmdWiCreateTasks(rawParentUrl, flags, config) {
       }, pf),
     }));
   } catch (e) { die(e.message); }
+  await guardParentLink({
+    config, org: parent.org, parent: taskParent(parent.id, parentWi, project), childType: 'Task', childProject: project, flags,
+  });
 
   console.log(`${resolved.length} task(s), ${tasks.totalHours(list)}h, under #${parent.id} — ${pf['System.Title'] || ''}`);
   if (!flags.yes) {
@@ -2511,7 +2591,23 @@ async function cmdWhoami(config) {
 // Raw REST passthrough. A path (e.g. "/Platform/_apis/git/repositories") is appended
 // to the org base; a full https:// URL is used as-is. api-version=7.1 is added
 // unless the URL already carries one. Body: inline JSON or @file.
-async function cmdRaw(method, apiPath, body, config) {
+/**
+ * Pure: the Content-Type `raw` sends. `--content-type` wins; otherwise a work item create or
+ * update (POST /_apis/wit/workitems/$Type, PATCH /_apis/wit/workitems/<id>) gets
+ * application/json-patch+json, which Azure demands there and refuses plain JSON for.
+ * Everything else — sub-resources like /workitems/<id>/comments included — stays application/json.
+ */
+function rawContentType(method, url, override) {
+  if (override && override !== true) return String(override);
+  const m = String(method || '').toUpperCase();
+  const pathOnly = String(url || '').split('?')[0];
+  if ((m === 'PATCH' || m === 'POST') && /\/_apis\/wit\/workitems\/(\d+|\$[^/]+)\/?$/i.test(pathOnly)) {
+    return 'application/json-patch+json';
+  }
+  return 'application/json';
+}
+
+async function cmdRaw(method, apiPath, body, config, flags = {}) {
   if (!method || method === true) die('Usage: raw <METHOD> <path|url> [json|@file]');
   if (!apiPath || apiPath === true) die('Usage: raw <METHOD> <path|url> [json|@file]');
   if (!/^https?:\/\//i.test(apiPath)) {
@@ -2534,7 +2630,8 @@ async function cmdRaw(method, apiPath, body, config) {
     catch (e) { die(`Body is not valid JSON: ${e.message}`); }
   }
 
-  const data = await request(url, { method: m, pat: config.pat, body: payload });
+  const contentType = rawContentType(m, url, flags['content-type']);
+  const data = await request(url, { method: m, pat: config.pat, body: payload, headers: { 'Content-Type': contentType } });
   console.log(typeof data === 'string' ? data : JSON.stringify(data, null, 2));
 }
 
@@ -2878,7 +2975,7 @@ Usage:
   azure-connector config [--pat <token>] [--org <org>] [--project <p>] [--repo <r>] [--base-url <url>] [--pat-valid-to <YYYY-MM-DD>] [--pat-name "<name>"] [--pat-warn-days <n>]
   azure-connector pat check        # validate the PAT (connectionData) + show name/expiry/days-left
   azure-connector whoami [--profile <name>]                       # verify auth; print the org + visible projects
-  azure-connector raw <METHOD> <path|url> [<json>|@<file>]        # raw REST call (path appended to the org base; api-version added)
+  azure-connector raw <METHOD> <path|url> [<json>|@<file>] [--content-type <t>]   # raw REST call (path appended to the org base; api-version added; work item create/PATCH sent as json-patch+json)
   azure-connector create-repo <name> [--project <p>]              # create an empty git repository
   azure-connector sprints <project> [--team <t>] [--filter <pattern>] [--depth <n>] [--current] [--json]   # iterations + their start/finish dates (alias: iterations)
 
@@ -2930,9 +3027,15 @@ Usage:
   azure-connector wi link-pr    <wi-url> <pr-url>           # link an existing PR to the work item
   azure-connector wi add-link    <wi-url|id> <target-url|id> [--type related|parent|child|predecessor|successor|duplicate|duplicate-of] [--comment "<t>"] [--yes]
                                  # link two work items (default: related); skips an existing identical link; dry-run unless --yes
+                                 # parent/child inside one backlog level (Bug under a PBI…) is refused: --allow-same-level, --team <t>
+  azure-connector wi relink      <wi-url|id> <target-url|id> --to <related|parent|child|…> [--type <current>] [--comment "<t>"] [--yes]
+                                 # turn one link into another type (e.g. parent → related), one PATCH pinned to the revision read; dry-run unless --yes
+  azure-connector wi unlink      <wi-url|id> <target-url|id> [--type <current>] [--yes]
+                                 # remove one link between two work items; --type picks it when there are several; dry-run unless --yes
   azure-connector wi create      --project <p> --type "<Work Item Type>" --title "<t>" [--body-file <path>] [--from-markdown] [--activity <name>]
                                  [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--parent <id>] [--yes]
                                  # creates ANY type (Product Backlog Item, Bug, Feature…); dry-run unless --yes
+                                 # --parent on the same backlog level (Bug under a PBI…) is refused: --allow-same-level, --team <t>; same on create-task(s)
   azure-connector wi create-task <parent-url> "<title>" [--estimate <hours>] [--desc "<text>"] [--assignee <email>] [--activity <name>] [--yes]   # previews unless --yes
   azure-connector wi create-tasks <parent-url> --plan <file.json> [--assignee <email>] [--activity <name>] [--yes]   # every Task of the plan; previews unless --yes
    azure-connector wi attachments <wi-url>
@@ -3047,7 +3150,7 @@ async function main() {
   }
 
   if (group === 'whoami') return cmdWhoami(config);
-  if (group === 'raw') return cmdRaw(sub, arg1, arg2, config);
+  if (group === 'raw') return cmdRaw(sub, arg1, arg2, config, flags);
   if (group === 'create-repo') return cmdCreateRepo(sub, flags, config);
   if (group === 'sprints' || group === 'iterations') return cmdSprints(sub, flags, config);
 
@@ -3109,6 +3212,8 @@ async function main() {
     if (sub === 'set-state')   return cmdWiSetState(arg1, arg2, config, flags);
     if (sub === 'link-pr')     return cmdWiLinkPr(arg1, arg2, config, flags);
     if (sub === 'add-link')    return cmdWiAddLink(arg1, arg2, flags, config);
+    if (sub === 'relink')      return cmdWiReplaceLink('relink', arg1, arg2, flags, config);
+    if (sub === 'unlink')      return cmdWiReplaceLink('unlink', arg1, arg2, flags, config);
     if (sub === 'create') return cmdWiCreate(flags, config);
     if (sub === 'create-task') return cmdWiCreateTask(arg1, arg2, flags, config);
     if (sub === 'create-tasks') return cmdWiCreateTasks(arg1, flags, config);
@@ -3153,4 +3258,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, normalizeAzureRepoPath, demangleMsysArg, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId, supportsJson, JSON_COMMANDS };
+module.exports = { parseArgs, normalizeAzureRepoPath, demangleMsysArg, unescapeDescription, needPrUrlOrId, needWorkItemUrlOrId, supportsJson, JSON_COMMANDS, rawContentType };

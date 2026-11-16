@@ -218,16 +218,18 @@ effect the moment it is invoked.**
 | `wi edit-comment`, `wi delete-comment` | **yes** | none |
 | `wi set-estimate` | **yes** | `--dry-run` |
 | `wi link-pr` | **yes** | none |
-| `wi create-task`, `wi create-tasks` | **yes** | **requires `--yes`**; previews otherwise (`create-tasks` validates the whole plan first) |
-| `wi create` | **yes** | **requires `--yes`**; previews otherwise, and the render guard runs on the preview too |
+| `wi add-link` | **yes** | **requires `--yes`**; previews otherwise. Same-level hierarchy guard (§8.7) on `--type parent|child` |
+| `wi relink`, `wi unlink` | **yes** | **requires `--yes`**; previews otherwise. One PATCH pinned to the revision it was read at; `relink` to parent/child runs the hierarchy guard |
+| `wi create-task`, `wi create-tasks` | **yes** | **requires `--yes`**; previews otherwise (`create-tasks` validates the whole plan first). Hierarchy guard on the parent |
+| `wi create` | **yes** | **requires `--yes`**; previews otherwise, and the render guard runs on the preview too. Hierarchy guard on `--parent` |
 | `wi attach` | **yes** | **requires `--yes`**; previews otherwise |
 | `wi detach` | **yes** | **requires `--yes`**; previews otherwise, and the PATCH is pinned to the revision it was read at |
 | `wiki list|pages|get` | no | — |
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
 
-`build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`, `wi detach`, `pr attach`, `pr complete`
-and `pr vote` are the only commands that refuse to act without `--yes`. Do not assume that
+`build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi add-link`, `wi relink`, `wi unlink`, `wi attach`,
+`wi detach`, `pr attach`, `pr complete` and `pr vote` are the only commands that refuse to act without `--yes`. Do not assume that
 convention elsewhere.
 
 ---
@@ -386,6 +388,26 @@ nothing. On rejection the command names the **blocking field** and prints its
 > `allowedValues` via `$expand`, and a gating field commonly reports
 > `alwaysRequired: false` — so field metadata alone never predicts the failure.
 
+### 8.7 Same-level hierarchy guard (on by default)
+
+Runs before every parent/child link the CLI writes: `wi create --parent`, `wi create-task`,
+`wi create-tasks`, `wi add-link --type parent|child` and `wi relink --to parent|child`, the
+preview included. It reads the project's backlog configuration (`_apis/work/backlogconfiguration`)
+and refuses, with exit **1** and nothing written, a parent and child whose types sit on the **same
+backlog level**. Bug-category types join the requirement level or the task level according to the
+team's `bugsBehavior` (`asRequirements` / `asTasks`) and are on no level when it is `off`.
+
+Why: Azure stores such a link without error, and the backlog then hides both items, blocks
+reordering for the whole sprint and points at the child ("There is same category hierarchy on this
+backlog"). The usual cause is a Bug filed as a child of the PBI it came from while bugs are managed
+as requirements. Link it as `related` instead; `wi relink <bug> <pbi> --to related --yes` repairs one
+already written.
+
+- `--allow-same-level` skips the guard (and its two reads) when the hierarchy is intended.
+- `--team <t>` reads that team's configuration; the default is the project's default team.
+  `bugsBehavior` is a team setting, so teams can disagree.
+- A type on no backlog level (Test Case, …) is never a conflict.
+
 ---
 
 ## 9. Command reference
@@ -405,7 +427,7 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 
 | Command | Notes |
 |---|---|
-| `raw <METHOD> <path\|url> [<json>\|@<file>]` | Any endpoint not yet wrapped. A `path` is appended to the org base; a full `https://` URL is used as-is. `api-version=7.1` is added unless already present. Body is inline JSON or `@file`. Shares auth, retry and profile selection with every other command. **Writes if the method writes.** |
+| `raw <METHOD> <path\|url> [<json>\|@<file>]` | Any endpoint not yet wrapped. A `path` is appended to the org base; a full `https://` URL is used as-is. `api-version=7.1` is added unless already present. Body is inline JSON or `@file`. Shares auth, retry and profile selection with every other command. Content-Type is `application/json`, except a work item create or update (`POST …/_apis/wit/workitems/$Type`, `PATCH …/_apis/wit/workitems/<id>`), which goes as `application/json-patch+json` — the only type Azure accepts there; `--content-type <t>` overrides either. **Writes if the method writes.** |
 
 > From Git Bash (MSYS) a leading-slash path is rewritten to a Windows path before Node
 > sees it. `raw` strips the Git root (`EXEPATH`) back off; when it cannot, it exits **1**
@@ -506,9 +528,12 @@ comment reading "Bob voted 10" is correctly ignored.
 | `wi set-state <url\|id> "<state>"` | `--no-preflight`, `--dry-run`, `--type` | See §8.6. **Writes.** |
 | `wi set-estimate <url\|id> <hours>` | — | Writes `OriginalEstimate` **and** `RemainingWork`. **Never touches `CompletedWork`**, despite the name. This is the *opening* move. `--dry-run` previews (honoured since 2026-10-30; before that it was accepted and ignored, and the estimate was written). **Writes.** |
 | `wi complete <url\|id> --hours <n>` | `--state "<state>"`, `--assignee <email>`, `--no-preflight`, `--dry-run` | The closing move: `CompletedWork = n`, `RemainingWork = 0`. A board that gates `Done` on `CompletedWork` rejects the transition until this runs. **The state changes only with `--state`**; without it the hours are recorded and the task stays where it was (stderr says so). With `--state`, the hours, `--assignee` and the state go in **one** PATCH, validated first like `set-state` (nothing written on a rejection; a rejection about an empty Assigned To names `--assignee`). Pass `--hours 0` when the task closed without delivery — the record should not claim work that did not happen. **Writes.** |
-| `wi create --project <p> --type "<type>" --title "<t>"` | `--body-file` (+ `--from-markdown`), `--desc`, `--area`, `--iteration`, `--assignee <email>`, `--activity <name>`, `--parent <id>`, `--org`, `--force`, `--yes` | Creates a work item of **any** type (Product Backlog Item, Bug, Feature, …); the body goes to `System.Description`. Prints the resolved plan and exits unless `--yes`. The render guard runs on every field **before** the preview, so a preview never shows a create the lib would refuse. `--parent` links it as a child. **Writes only with `--yes`.** |
-| `wi create-task <parent-url\|id> "<title>"` | `--estimate <h>`, `--desc`, `--assignee <email>`, `--activity <name>` | Creates a `Task` as a child. **Inherits the parent's Area Path, Iteration Path and Assignee** unless overridden. `--activity` defaults to `Development` because some processes make Activity required, and a Task created without it fails with `TF401320`. **Previews unless `--yes`** (since 2026-10-27; it used to write with no dry-run). |
+| `wi create --project <p> --type "<type>" --title "<t>"` | `--body-file` (+ `--from-markdown`), `--desc`, `--area`, `--iteration`, `--assignee <email>`, `--activity <name>`, `--parent <id>`, `--allow-same-level`, `--team <t>`, `--org`, `--force`, `--yes` | Creates a work item of **any** type (Product Backlog Item, Bug, Feature, …); the body goes to `System.Description`. Prints the resolved plan and exits unless `--yes`. The render guard runs on every field **before** the preview, so a preview never shows a create the lib would refuse. `--parent` links it as a child, after the hierarchy guard of §8.7 (preview included). **Writes only with `--yes`.** |
+| `wi create-task <parent-url\|id> "<title>"` | `--estimate <h>`, `--desc`, `--assignee <email>`, `--activity <name>`, `--allow-same-level`, `--team <t>` | Creates a `Task` as a child; a parent on the Task level (another Task type) is refused by the hierarchy guard. **Inherits the parent's Area Path, Iteration Path and Assignee** unless overridden. `--activity` defaults to `Development` because some processes make Activity required, and a Task created without it fails with `TF401320`. **Previews unless `--yes`** (since 2026-10-27; it used to write with no dry-run). |
 | `wi create-tasks <parent-url|id> --plan <file.json>` | `--assignee <email>`, `--activity <name>`, `--yes` | Every Task of a plan file under one parent, in order. Plan = list of `{ title|titulo, hours|horas, desc, activity, assignee }`, or an object keyed by parent id (one file for a whole Feature). The whole plan is validated before the first create; stops at the first failure and lists what was already created. **Previews unless `--yes`.** |
+| `wi add-link <wi-url\|id> <target-url\|id>` | `--type related\|parent\|child\|predecessor\|successor\|duplicate\|duplicate-of`, `--comment "<t>"`, `--allow-same-level`, `--team <t>`, `--yes` | Adds a work item → work item link (default `related`). An identical link is reported and left alone; a second parent is refused; `parent`/`child` runs the hierarchy guard. **Previews unless `--yes`.** |
+| `wi relink <wi-url\|id> <target-url\|id> --to <type>` | `--type <current>`, `--comment "<t>"`, `--allow-same-level`, `--team <t>`, `--yes` | Turns **one** existing link to the target into another type (e.g. `parent` → `related`) in one PATCH: `test /rev` + `test` of the link + `remove` + `add`, so an item edited since it was read changes nothing. `--type` picks the current link when there are several to that target (otherwise refused, listing them). Already of the new type: a no-op. A second parent and a same-level hierarchy are refused. **Previews unless `--yes`.** |
+| `wi unlink <wi-url\|id> <target-url\|id>` | `--type <current>`, `--yes` | Removes **one** link to the target, same pinned PATCH and `--type` rule as `relink`. Only work item links: PR, commit, attachment and hyperlink relations are never touched. **Previews unless `--yes`.** |
 | `wi link-pr <wi-url\|id> <pr-url\|id>` | — | Adds the ArtifactLink relation. Resolves the PR's project/repo ids automatically; works across projects in one org. **Writes, no dry-run.** |
 | `wi link <url\|id>` | `--no-type` | Prints the canonical reference line, with the project taken from the **root segment of the Area path** — which is always the project name. Warns on stderr when that disagrees with a passed `--project`. Read-only. |
 | `wi attachments <url\|id>` | — | Index, name, comment, download URL. |
@@ -783,8 +808,8 @@ same numbers.
 npm test      # or: node --test
 ```
 
-287 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
-two kinds. The transport, comment, `wi detach`, `pr attach` and `pr vote` tests drive the lib or the CLI
+309 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+two kinds. The transport, comment, `wi detach`, `pr attach`, `pr vote` and hierarchy/relink tests drive the lib or the CLI
 against a throwaway `127.0.0.1` server on an ephemeral port — the only way to assert that a
 binary body leaves as bytes, that an error Azure returns *after* storing a comment is reported
 as stored, and that a vote is read back after the write. The `wi create` tests spawn the CLI in
@@ -797,6 +822,7 @@ config or reach a real org.
 | `test/analytics.test.js` | The measurement helpers behind `wi updates`, `wi relations`, `sprints`, `pr timeline` and `repo`. |
 | `test/pr-attach.test.js` | `pr attach` and `--attach-images`: name cleaning, the reuse/refuse rule by SHA-1, url forms, error explanations, local-image detection (spaces, `<…>`, `%20`, titles, code left alone), `noRetryStatus` in `request()`, the recovered-after-error upload, and the CLI end to end against a fake Azure on an ephemeral port (preview, upload, re-run, clash, refused names, wrong project, no author e-mail, the 4000-char cap counted with urls). |
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
+| `test/hierarchy.test.js` | The same-level hierarchy guard (levels from the backlog configuration, `bugsBehavior` on/off, `--team`, `--allow-same-level` without reads), `wi relink`/`wi unlink` (link picking, the pinned PATCH, a stale revision writing nothing) and the `raw` Content-Type, pure and through the CLI against a fake Azure: `wi create --parent`, `create-task`, `add-link`, `relink`, `unlink`, `raw PATCH`. |
 | `test/pr-vote.test.js` | `pr vote` (vote parsing, blockers for a closed PR and a moved head, preview writes nothing, `--yes` writes once and reads back, a vote Azure did not keep fails), `pr comments --json` (no author e-mail), and the `--json` guard on text-only commands. |
 
 The cases worth knowing are the ones asserting what must **not** count: a same-value

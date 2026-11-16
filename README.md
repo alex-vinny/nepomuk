@@ -263,9 +263,11 @@ For any endpoint not yet wrapped. A `path` is appended to the org base (`https:/
 
 > From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path (`C:/Program Files/Git/Platform/...`) before Node sees it. `raw` undoes that from the Git root (`EXEPATH`); when it cannot, it exits 1 before any request and says so, instead of sending `C:` to Azure (which answers 400 "potentially dangerous Request.Path value"). `wiki get --page` does the same. A full URL, a path without the leading slash, `MSYS_NO_PATHCONV=1` or PowerShell avoid the rewrite altogether.
 
-> `raw` sends `application/json`. A work-item `PATCH` needs `application/json-patch+json`, so it fails through
-> `raw`: use `wi set-field` / `wi set-state` (or `wi create` for a new item) instead. Only `raw` reads the body from
-> the positional (`'<json>'` or `@file`); `--body-file` is ignored here.
+> `raw` sends `application/json`, except a work item create or update (`POST …/_apis/wit/workitems/$Type`,
+> `PATCH …/_apis/wit/workitems/<id>`), which goes as `application/json-patch+json` — Azure refuses plain JSON
+> there. `--content-type <t>` overrides either. A wrapped command (`wi set-field`, `wi set-state`, `wi relink`, …)
+> is still the better route: it previews and guards the write. Only `raw` reads the body from the positional
+> (`'<json>'` or `@file`); `--body-file` is ignored here.
 
 ---
 
@@ -1151,6 +1153,41 @@ existing link of the same type to the same target is reported and nothing is wri
 self link and a second parent (a work item has only one). Ids are org-level, so a bare id works
 across projects; a URL takes the org from the URL.
 
+##### Same-level hierarchy guard
+
+A parent and a child on the **same backlog level** — a Bug under a Product Backlog Item when the team
+manages bugs as requirements, a Task under another Task type — are stored by Azure without error.
+The sprint backlog then hides both, blocks reordering for everyone and shows *"There is same
+category hierarchy on this backlog"*. So every parent/child link the CLI writes (`add-link --type
+parent|child`, `relink --to parent|child`, `wi create --parent`, `create-task`, `create-tasks`) is
+checked first against the project's backlog configuration, preview included, and refused with
+exit 1:
+
+```
+ERROR: Refusing to make the new Bug a child of #1180 (Product Backlog Item): both are on the
+"Backlog items" backlog level (bugs are managed as requirements on this team). ...
+```
+
+Link a Bug to the item it came from as `related`. `--allow-same-level` skips the check when the
+hierarchy is intended; `--team <t>` reads that team's configuration (bugs-as-requirements is a team
+setting; the default team is used otherwise).
+
+#### Change or remove a link
+
+```bash
+node index.js wi relink 1201 1180 --to related              # dry-run: parent → related
+node index.js wi relink 1201 1180 --to related --yes
+node index.js wi relink 1201 1180 --to related --type parent --yes   # several links to 1180: pick one
+node index.js wi unlink 1201 1180 --yes                     # remove the only link to 1180
+```
+
+`relink` turns one existing link to the target into another type; `unlink` removes it. Each is
+**one** PATCH that first tests the item's revision and the link itself, so an item edited since it
+was read is left untouched (re-run). With several links to the same target, `--type` picks the one
+to change, otherwise the call is refused and lists them. Only work item links are touched — PR,
+commit, attachment and hyperlink relations never are. **Dry-run unless `--yes`.** This is the repair
+for a same-level hierarchy that is already on the board: `wi relink <bug> <pbi> --to related --yes`.
+
 ---
 
 #### Create a work item of any type
@@ -1159,12 +1196,12 @@ across projects; a URL takes the org from the URL.
 node index.js wi create --project <p> --type "<Work Item Type>" --title "<t>" \
   [--body-file <path> [--from-markdown]] [--desc "<text>"] \
   [--area "<path>"] [--iteration "<path>"] [--assignee <email>] [--activity <name>] \
-  [--parent <id>] [--yes]
+  [--parent <id> [--allow-same-level] [--team <t>]] [--yes]
 ```
 
-`create-task` only makes Tasks, and only under a parent; `raw` cannot help either, because
-creating a work item takes `application/json-patch+json`. `wi create` opens a Product
-Backlog Item, Bug, Feature or any other type the process defines.
+`create-task` only makes Tasks, and only under a parent. `wi create` opens a Product
+Backlog Item, Bug, Feature or any other type the process defines, with the previews and guards
+`raw` does not have. `--parent` goes through the same-level hierarchy guard above.
 
 - **Previews unless `--yes`.** Without it the resolved plan (org, project, type, title and
   every field) is printed and nothing is created.

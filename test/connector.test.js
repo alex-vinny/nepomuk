@@ -1199,10 +1199,13 @@ test('raw: a path Git Bash rewrote and that cannot be recovered exits 1 before a
 });
 
 test('wi create: without --yes prints the plan and creates nothing', () => {
+  // --allow-same-level skips the hierarchy guard, the only part of a --parent preview that reads
+  // Azure (closed port here); the guard itself is covered in hierarchy.test.js.
   const res = runCli((dir) => {
     fs.writeFileSync(path.join(dir, 'b.md'), '## Pedido\n\n- um\n  - sub\n');
     return ['wi', 'create', '--project', 'Platform', '--type', 'Bug', '--title', 'T',
-      '--body-file', path.join(dir, 'b.md'), '--from-markdown', '--area', 'Platform\\Team', '--parent', '#12'];
+      '--body-file', path.join(dir, 'b.md'), '--from-markdown', '--area', 'Platform\\Team', '--parent', '#12',
+      '--allow-same-level'];
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /DRY RUN — nothing was created/);
