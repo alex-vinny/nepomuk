@@ -4,6 +4,10 @@ A zero-dependency Node.js CLI for Azure DevOps — pull requests (create, descri
 
 Built as a fallback for when the MCP azure-devops integration is unavailable or unreliable.
 
+Source: `github.com/alex-vinny/nepomuk` (fix bugs on a branch, then a PR). Push auth is a repo-local git
+credential helper that reads the GitHub PAT from the `bedros` vault (`vault get github-pat`), so no token is
+stored in the repo or typed on the command line.
+
 > **Calling this from an agent or a script?** Read **[AGENTS.md](AGENTS.md)** instead — it is
 > the operating contract: the complete command × flag matrix, exit codes, stdout/stderr
 > discipline, which commands write, and every guard that can refuse a write. This README is
@@ -259,6 +263,10 @@ For any endpoint not yet wrapped. A `path` is appended to the org base (`https:/
 
 > From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path (`C:/Program Files/Git/Platform/...`) before Node sees it. `raw` undoes that from the Git root (`EXEPATH`); when it cannot, it exits 1 before any request and says so, instead of sending `C:` to Azure (which answers 400 "potentially dangerous Request.Path value"). `wiki get --page` does the same. A full URL, a path without the leading slash, `MSYS_NO_PATHCONV=1` or PowerShell avoid the rewrite altogether.
 
+> `raw` sends `application/json`. A work-item `PATCH` needs `application/json-patch+json`, so it fails through
+> `raw`: use `wi set-field` / `wi set-state` (or `wi create` for a new item) instead. Only `raw` reads the body from
+> the positional (`'<json>'` or `@file`); `--body-file` is ignored here.
+
 ---
 
 ### `create-repo` — Create an empty git repository
@@ -396,6 +404,10 @@ node index.js pr comment <pr-url> --body-file ./inline-comment.md --file /src/Se
 > **Self-correcting inline anchor.** For inline comments, the tool validates the anchor against the PR's **latest iteration** before posting: it auto-corrects the file path's casing/leading slash, picks the correct side (**right** for added/edited lines, **left** for deleted lines), and **refuses a line that doesn't exist** with a clear message (re-run your diff with `--force` and try again). Use `--dry-run` to preview where a comment would land without posting. Pass `--no-validate` to skip validation and post blindly (legacy behavior).
 >
 > Line numbers are the **new (right-hand) file** line numbers — the same ones `pr diff` prints.
+>
+> An **inline** comment does not reliably render a leading `###` heading: open it with a bold line instead
+> (`**Severity — Title**`). Keep each inline comment self-contained (snippet, problem, proposed fix); a reader
+> landing on one thread never sees the others, so "see item #N" leads nowhere.
 
 ##### Guards on an inline comment
 
@@ -460,6 +472,10 @@ node index.js pr reply <pr-url> <threadId> --body-file ./reply.md --comment 2
 Adds a comment inside thread `<threadId>` rather than starting a new one — the right call
 when answering a reviewer. Thread ids come from `pr comments`. `--comment <n>` sets the
 parent comment (default 1). Markdown body, `--body-file` only.
+
+> ⚠️ **Azure does not check that the thread belongs to the PR in the URL.** A thread id from another PR is accepted
+> and the reply lands on that other PR, silently (seen twice: replies posted on another team's PR). Take the id from
+> `pr comments` of the same PR right before replying. The same holds for `edit-comment` and any raw PATCH on a thread.
 
 ---
 
@@ -532,6 +548,8 @@ implementation**, instead of leaving the original (now-stale) text. Pass the new
 inline or via `--body-file`, and/or `--title` to rename. The same **4000-character** limit as
 `pr create` is enforced before the call.
 
+A **completed** PR rejects the update (`TF401181`): post the correction as a thread instead.
+
 ---
 
 #### Abandon a pull request
@@ -578,6 +596,9 @@ refuse it. `--expect-head <sha>` checks the head before anything is sent.
 | `--message-file <path>` | `Merged PR <id>: <title>`, the description and `Related work items: #…` | same shape as the web UI |
 | `--bypass "<reason>"` | — | the reason is recorded on the PR |
 | `--auto` | — | arms auto-complete as the PAT's user; not combinable with `--bypass` |
+
+⚠️ The default merge message carries the whole PR description. A long description makes the completion fail with
+`Completion options have exceeded the maximum encoded length (…/4000)`: pass `--message-file` with a one-line message.
 
 A policy that asks for a vote on the last iteration goes back to pending after any push, even a
 merge of the target branch, while the old votes still show. The preview lists those policies so it
