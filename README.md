@@ -263,7 +263,7 @@ For any endpoint not yet wrapped. A `path` is appended to the org base (`https:/
 
 > From Git Bash (MSYS), a leading-slash path like `/Platform/...` is rewritten to a Windows path (`C:/Program Files/Git/Platform/...`) before Node sees it. `raw` undoes that from the Git root (`EXEPATH`); when it cannot, it exits 1 before any request and says so, instead of sending `C:` to Azure (which answers 400 "potentially dangerous Request.Path value"). `wiki get --page` does the same. A full URL, a path without the leading slash, `MSYS_NO_PATHCONV=1` or PowerShell avoid the rewrite altogether.
 
-> `raw` sends `application/json`, except a work item create or update (`POST …/_apis/wit/workitems/$Type`,
+> `raw` sends `application/json`, except a work item create or update (`POST …/_apis/wit/workitems/$Type` or `%24Type`,
 > `PATCH …/_apis/wit/workitems/<id>`), which goes as `application/json-patch+json` — Azure refuses plain JSON
 > there. `--content-type <t>` overrides either. A wrapped command (`wi set-field`, `wi set-state`, `wi relink`, …)
 > is still the better route: it previews and guards the write. Only `raw` reads the body from the positional
@@ -1182,7 +1182,7 @@ node index.js wi unlink 1201 1180 --yes                     # remove the only li
 ```
 
 `relink` turns one existing link to the target into another type; `unlink` removes it. Each is
-**one** PATCH that first tests the item's revision and the link itself, so an item edited since it
+**one** PATCH that first tests the item's revision (unchanged revision = same link at that position), so an item edited since it
 was read is left untouched (re-run). With several links to the same target, `--type` picks the one
 to change, otherwise the call is refused and lists them. Only work item links are touched — PR,
 commit, attachment and hyperlink relations never are. **Dry-run unless `--yes`.** This is the repair

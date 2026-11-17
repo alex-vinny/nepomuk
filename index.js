@@ -2009,16 +2009,17 @@ async function cmdWiCreate(flags, config) {
 
 const flagValue = v => (v != null && v !== true ? v : undefined);
 
-/**
- * Refuses (exit 1) a new child whose type sits on the same backlog level as its parent —
- * see lib/hierarchy.js. `parent` may be passed when the caller already read it.
- * Returns the parent's { id, type, project }; skipped (null) with --allow-same-level.
- */
+/** Pure: { id, type, project } of a parent work item already read with its fields. */
 function taskParent(id, parentWi, project) {
   const f = (parentWi && parentWi.fields) || {};
   return { id: Number(id), type: f['System.WorkItemType'], project: f['System.TeamProject'] || project };
 }
 
+/**
+ * Refuses (exit 1) a new child whose type sits on the same backlog level as its parent —
+ * see lib/hierarchy.js. `parent` may be passed when the caller already read it.
+ * Returns the parent's { id, type, project }; skipped (no read) with --allow-same-level.
+ */
 async function guardParentLink({ config, org, parentId, parent, childType, childProject, flags }) {
   if (flags['allow-same-level']) return parent || null;
   try {
@@ -2593,7 +2594,7 @@ async function cmdWhoami(config) {
 // unless the URL already carries one. Body: inline JSON or @file.
 /**
  * Pure: the Content-Type `raw` sends. `--content-type` wins; otherwise a work item create or
- * update (POST /_apis/wit/workitems/$Type, PATCH /_apis/wit/workitems/<id>) gets
+ * update (POST /_apis/wit/workitems/$Type or %24Type, PATCH /_apis/wit/workitems/<id>) gets
  * application/json-patch+json, which Azure demands there and refuses plain JSON for.
  * Everything else — sub-resources like /workitems/<id>/comments included — stays application/json.
  */
@@ -2601,7 +2602,7 @@ function rawContentType(method, url, override) {
   if (override && override !== true) return String(override);
   const m = String(method || '').toUpperCase();
   const pathOnly = String(url || '').split('?')[0];
-  if ((m === 'PATCH' || m === 'POST') && /\/_apis\/wit\/workitems\/(\d+|\$[^/]+)\/?$/i.test(pathOnly)) {
+  if ((m === 'PATCH' || m === 'POST') && /\/_apis\/wit\/workitems\/(\d+|(?:\$|%24)[^/]+)\/?$/i.test(pathOnly)) {
     return 'application/json-patch+json';
   }
   return 'application/json';

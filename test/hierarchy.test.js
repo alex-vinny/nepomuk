@@ -95,18 +95,16 @@ test('pickLink: the only link, or the one --type names; ambiguity and absence ar
   assert.throws(() => pickLink([], { id: 1, targetId: 5 }), /#1 has no link to #5/);
 });
 
-test('buildReplaceLinkOps: revision and link are tested before the remove; relink adds the new type to the same url', () => {
+test('buildReplaceLinkOps: the revision is tested before the remove; relink adds the new type to the same url', () => {
   const link = { index: 2, rel: 'System.LinkTypes.Hierarchy-Reverse', url: WI(12) };
   const unlink = buildReplaceLinkOps({ rev: 4, link });
   assert.deepStrictEqual(unlink, [
     { op: 'test', path: '/rev', value: 4 },
-    { op: 'test', path: '/relations/2/rel', value: 'System.LinkTypes.Hierarchy-Reverse' },
-    { op: 'test', path: '/relations/2/url', value: WI(12) },
     { op: 'remove', path: '/relations/2' },
   ]);
   const relink = buildReplaceLinkOps({ rev: 4, link, newRel: 'System.LinkTypes.Related', comment: 'was parent' });
-  assert.deepStrictEqual(relink.slice(0, 4), unlink);
-  assert.deepStrictEqual(relink[4], {
+  assert.deepStrictEqual(relink.slice(0, 2), unlink);
+  assert.deepStrictEqual(relink[2], {
     op: 'add', path: '/relations/-',
     value: { rel: 'System.LinkTypes.Related', url: WI(12), attributes: { comment: 'was parent' } },
   });
@@ -118,6 +116,7 @@ test('rawContentType: work item create/update is json-patch; everything else sta
   assert.strictEqual(rawContentType('PATCH', 'https://x/acme/P/_apis/wit/workitems/42?api-version=7.1'), 'application/json-patch+json');
   assert.strictEqual(rawContentType('patch', 'https://x/acme/_apis/wit/workItems/42'), 'application/json-patch+json');
   assert.strictEqual(rawContentType('POST', 'https://x/acme/P/_apis/wit/workitems/$Bug?api-version=7.1'), 'application/json-patch+json');
+  assert.strictEqual(rawContentType('POST', 'https://x/acme/P/_apis/wit/workitems/%24Bug?api-version=7.1'), 'application/json-patch+json');
   assert.strictEqual(rawContentType('POST', 'https://x/acme/P/_apis/wit/workItems/42/comments?api-version=7.1-preview.3'), 'application/json');
   assert.strictEqual(rawContentType('POST', 'https://x/acme/P/_apis/wit/workitemsbatch?api-version=7.1'), 'application/json');
   assert.strictEqual(rawContentType('GET', 'https://x/acme/P/_apis/wit/workitems/42'), 'application/json');
@@ -151,7 +150,8 @@ function fakeAzure({ bugsBehavior = 'asRequirements' } = {}) {
       const [url] = req.url.split('?');
       state.requests.push(`${req.method} ${url}`);
       let m;
-      if (req.method === 'GET' && /^\/acme\/P(\/[^/]+)?\/_apis\/work\/backlogconfiguration$/.test(url)) {
+      if (req.method === 'GET' && (m = /^\/acme\/P(\/[^/]+)?\/_apis\/work\/backlogconfiguration$/.exec(url))) {
+        if (m[1] === '/NoSuchTeam') return json(res, 404, { message: 'fake: team NoSuchTeam does not exist' });
         return json(res, 200, { ...BACKLOG, bugsBehavior });
       }
       if (req.method === 'GET' && url === '/acme/P/_apis/wit/workitemtypecategories/Microsoft.BugCategory') {
@@ -216,6 +216,14 @@ test('wi create --parent: a Bug under a Product Backlog Item is refused, preview
     assert.match(res.stderr, /Refusing to make the new Bug a child of #12 \(Product Backlog Item\): both are on the "Backlog items" backlog level/);
     assert.doesNotMatch(res.stdout, /DRY RUN/);
   }
+  assert.strictEqual(state.writes.length, 0);
+}));
+
+test('wi create --parent: an unreadable backlog configuration stops with the way out, nothing created', withFake({}, async ({ cli, state }) => {
+  const res = await cli('wi', 'create', '--project', 'P', '--type', 'Bug', '--title', 'T', '--parent', '13', '--team', 'NoSuchTeam', '--yes');
+  assert.strictEqual(res.status, 1);
+  assert.match(res.stderr, /Could not read the backlog levels of "P" \(team "NoSuchTeam"\)/);
+  assert.match(res.stderr, /--allow-same-level to skip the check/);
   assert.strictEqual(state.writes.length, 0);
 }));
 
@@ -292,9 +300,9 @@ test('wi relink: parent → related previews, then writes one json-patch PATCH p
   assert.strictEqual(state.writes.length, 1);
   const w = state.writes[0];
   assert.strictEqual(w.contentType, 'application/json-patch+json');
-  assert.deepStrictEqual(w.ops.map((o) => `${o.op} ${o.path}`), ['test /rev', 'test /relations/1/rel', 'test /relations/1/url', 'remove /relations/1', 'add /relations/-']);
+  assert.deepStrictEqual(w.ops.map((o) => `${o.op} ${o.path}`), ['test /rev', 'remove /relations/1', 'add /relations/-']);
   assert.strictEqual(w.ops[0].value, 4);
-  assert.deepStrictEqual(w.ops[4].value, { rel: 'System.LinkTypes.Related', url: WI(12), attributes: { comment: 'same level' } });
+  assert.deepStrictEqual(w.ops[2].value, { rel: 'System.LinkTypes.Related', url: WI(12), attributes: { comment: 'same level' } });
 }));
 
 test('wi relink: to a same-level parent is refused, so is a second parent; already of that type is a no-op', withFake({}, async ({ cli, state }) => {
@@ -313,6 +321,11 @@ test('wi relink: to a same-level parent is refused, so is a second parent; alrea
   const same = await cli('wi', 'relink', '20', '7', '--to', 'related', '--yes');
   assert.strictEqual(same.status, 0, same.stderr);
   assert.match(same.stdout, /already has a related link to #7 — nothing to do/);
+
+  // --type names a link that is not there: refused, not swallowed by the "already of that type" no-op.
+  const wrongType = await cli('wi', 'relink', '20', '7', '--to', 'related', '--type', 'parent', '--yes');
+  assert.strictEqual(wrongType.status, 1);
+  assert.match(wrongType.stderr, /#20 has no parent link to #7 \(it has: related\)/);
   assert.strictEqual(state.writes.length, 0);
 
   const missingTo = await cli('wi', 'relink', '20', '12');
@@ -328,7 +341,7 @@ test('wi unlink: removes the one link, refuses an absent one, and a stale revisi
   const ok = await cli('wi', 'unlink', '20', '7', '--yes');
   assert.strictEqual(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /Unlinked #20 from #7 \(was related\)\./);
-  assert.deepStrictEqual(state.writes[0].ops.map((o) => o.op), ['test', 'test', 'test', 'remove']);
+  assert.deepStrictEqual(state.writes[0].ops.map((o) => o.op), ['test', 'remove']);
 
   const withTo = await cli('wi', 'unlink', '20', '7', '--to', 'related');
   assert.strictEqual(withTo.status, 1);
