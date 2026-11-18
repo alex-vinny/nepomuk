@@ -941,9 +941,27 @@ node index.js wi comment <wi-url> --body-file ./update.html
 node index.js wi comment <wi-url> --body-file ./update.md
 node index.js wi comment <wi-url> --body-file ./root-cause.html --field Custom.RootCause  # route into a field instead
 node index.js wi comment <wi-url> --body-file ./update.html --as-comment                 # post even though fields exist
+node index.js wi comment <wi-url> --body-file ./update.md --mention creator,ana@example.com  # @mention people (they get notified)
 ```
 
 Work item comments require `--body-file`. Inline text arguments are not supported.
+
+##### Mentioning people (`--mention`)
+
+A typed `@Name` in the body is plain text: it notifies nobody. `--mention` (on `wi comment` and
+`wi edit-comment`) adds a first paragraph with real mentions — the anchor Azure itself writes,
+`<a href="#" data-vss-mention="version:2.0,<identity id>">@Name</a>` — which is what sends the
+notification. It takes a comma-separated list; each entry is:
+
+- `creator` — the item's `System.CreatedBy`;
+- `assignee` — the item's `System.AssignedTo` (refused when the item is unassigned);
+- an email or a name — looked up in the organization's identities (vssps). It must match exactly one
+  active identity; zero or several matches stop the command before anything is posted.
+
+The same person reached twice is mentioned once. After the write the comment is read back, and the
+command prints `Mentioned: <name> (<entry>)`; if Azure dropped an anchor it says so and exits 1.
+`--mention` is refused with `--field` (a form field notifies nobody). An edit that adds a mention
+may not notify: to be sure the person is told, post a new comment.
 
 ##### The project comes from the item, not from your config
 

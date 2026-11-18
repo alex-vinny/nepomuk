@@ -20,8 +20,8 @@
  *   pr close-thread  <pr-url> <threadId>                  Close/resolve a thread
  *   wi get      <wi-url>           Get work item data
  *   wi comments <wi-url>           List work item comments
- *   wi comment  <wi-url> --body-file <path> [--field <ref>] [--as-comment]  Add a comment; if the WI has long-form custom fields, lists them and stops unless --field/--as-comment
- *   wi edit-comment <wi-url> <commentId> --body-file <path>   Edit a comment in place (Markdown file)
+ *   wi comment  <wi-url> --body-file <path> [--field <ref>] [--as-comment] [--mention creator,assignee,<email>]  Add a comment (--mention notifies); if the WI has long-form custom fields, lists them and stops unless --field/--as-comment
+ *   wi edit-comment <wi-url> <commentId> --body-file <path> [--mention ...]   Edit a comment in place (Markdown file)
  *   wi delete-comment <wi-url> <commentId>   Delete a work item comment (get id via `wi comments --ids`)
  *   wi set-state <wi-url> <state>  Change a work item's state (System.State)
  *   wi complete <wi-url> --hours <n> [--state "Done"] [--assignee <email>] [--dry-run]  Record the work; close only with --state
@@ -51,6 +51,7 @@ const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring 
 const { request, validatePat } = require('./lib/api');
 const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
+const { parseMentionSpecs, mentionedIds } = require('./lib/mentions');
 const tasks = require('./lib/tasks');
 const relations = require('./lib/relations');
 const hierarchy = require('./lib/hierarchy');
@@ -158,7 +159,7 @@ const KNOWN_FLAGS = new Set([
   'title-contains', 'top', 'type', 'wi', 'wiki', 'wiql', 'work-items', 'yes', 'plan',
   'against', 'batch', 'verify', 'no-strict-flags',
   'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
-  'allow-same-level', 'to', 'content-type',
+  'allow-same-level', 'to', 'content-type', 'mention',
 ]);
 
 /**
@@ -1705,6 +1706,7 @@ async function cmdWiComment(rawUrl, text, flags, config) {
   // One-shot routing: --field <ref> puts the body into a form field instead of
   // posting a comment (same effect as `wi set-field`, no separate call).
   if (flags.field && flags.field !== true) {
+    if (flags.mention) die('--mention works only on a comment; a form field does not notify anyone. Drop --field or --mention.');
     // A comment body is authored in Markdown; a field renders HTML. Routing one into
     // the other without converting is exactly how raw markdown ends up on the board.
     const value = wi.markdownToFieldHtml(content);
@@ -1734,8 +1736,39 @@ async function cmdWiComment(rawUrl, text, flags, config) {
     }
   }
 
-  const result = await wi.addComment({ config, ...p, text: inlineCommentImages(content, flags['body-file']) });
+  const mentions = await commentMentions(flags, p, config);
+
+  const result = await wi.addComment({ config, ...p, text: inlineCommentImages(content, flags['body-file']), mentions });
   console.log(`Comment added. ID: ${result.id}, created: ${result.createdDate}`);
+  await reportMentions(config, p, result.id, mentions);
+}
+
+// --mention: resolved BEFORE any write, so a typo or an ambiguous name posts nothing.
+async function commentMentions(flags, p, config) {
+  let specs;
+  try { specs = parseMentionSpecs(flags.mention); } catch (e) { die(e.message); }
+  if (!specs.length) return [];
+  try {
+    return await wi.resolveCommentMentions({ config, ...p, specs });
+  } catch (e) {
+    die(`${e.message}\nNothing was posted.`);
+  }
+}
+
+// Read the comment back and confirm Azure kept each mention anchor: the anchor is what
+// sends the notification, so a mention that did not survive is reported as a failure.
+async function reportMentions(config, p, commentId, mentions) {
+  if (!mentions || !mentions.length) return;
+  const stored = await wi.getComment({ config, ...p, commentId }).catch(() => null);
+  const ids = new Set(mentionedIds(stored && stored.text));
+  const missing = mentions.filter((m) => !ids.has(m.id.toLowerCase()));
+  console.log(`Mentioned: ${mentions.map((m) => `${m.displayName} (${m.source})`).join(', ')}`);
+  if (!stored) {
+    console.error('warning: could not read the comment back to confirm the mentions.');
+  } else if (missing.length) {
+    console.error(`error: Azure did not keep the mention of ${missing.map((m) => m.displayName).join(', ')} — no notification was sent to them.`);
+    process.exitCode = 1;
+  }
 }
 
 async function cmdWiEditComment(rawUrl, commentIdStr, text, flags, config) {
@@ -1756,8 +1789,10 @@ async function cmdWiEditComment(rawUrl, commentIdStr, text, flags, config) {
   }
   if (!content.trim()) die('Comment body file is empty.');
   const p = await withWorkItemProject(needWorkItemUrlOrId(rawUrl, config, flags), config, flags);
-  await wi.editComment({ config, ...p, commentId, text: inlineCommentImages(content, flags['body-file']) });
+  const mentions = await commentMentions(flags, p, config);
+  await wi.editComment({ config, ...p, commentId, text: inlineCommentImages(content, flags['body-file']), mentions });
   console.log(`Work item ${p.id} comment ${commentId} updated.`);
+  await reportMentions(config, p, commentId, mentions);
 }
 
 async function cmdWiDeleteComment(rawUrl, commentIdStr, config, flags) {
@@ -3019,7 +3054,7 @@ Usage:
   azure-connector wi field       <wi-url> <fieldRef>                       # print one field's raw value (e.g. for an edit round-trip)
   azure-connector wi set-field   <wi-url> <fieldRef> [--body-file <path>] [--allow-empty]   # set ANY field from a file (HTML/markdown/plain)
   azure-connector wi comments    <wi-url> [--ids] [--raw]                  # --ids lists comment IDs (newest first); --raw dumps raw HTML
-  azure-connector wi comment     <wi-url> --body-file <path> [--field <ref>] [--as-comment]   # if the WI has long-form custom fields (a "Root Cause" control, etc.) it lists them and stops; --field <ref> routes the body into that field, --as-comment posts anyway
+  azure-connector wi comment     <wi-url> --body-file <path> [--field <ref>] [--as-comment] [--mention creator,assignee,<email>]   # --mention adds real @mentions (notifies); if the WI has long-form custom fields (a "Root Cause" control, etc.) it lists them and stops; --field <ref> routes the body into that field, --as-comment posts anyway
   azure-connector wi edit-comment <wi-url> <commentId> --body-file <path> # Markdown file (converted to HTML); inline text is not supported
   azure-connector wi delete-comment <wi-url> <commentId>    # delete a comment (get id via wi comments --ids)
   azure-connector wi set-state   <wi-url> "<state>"          # e.g. "In Progress", "Done"

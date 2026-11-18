@@ -214,7 +214,7 @@ effect the moment it is invoked.**
 | `wi set-field` | **yes** | `--dry-run`, `--verify`, and the always-on render guard |
 | `wi set-state` | **yes** | `--dry-run` + always-on rule preflight |
 | `wi complete` | **yes** | `--dry-run`; with `--state`, the rule preflight of §8.6 |
-| `wi comment` | **yes** | field-routing gate (exit 2) |
+| `wi comment` | **yes** | field-routing gate (exit 2); `--mention` resolved before the write (unknown or ambiguous person = nothing posted), read back after (anchor dropped = exit 1) |
 | `wi edit-comment`, `wi delete-comment` | **yes** | none |
 | `wi set-estimate` | **yes** | `--dry-run` |
 | `wi link-pr` | **yes** | none |
