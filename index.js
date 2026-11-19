@@ -160,6 +160,7 @@ const KNOWN_FLAGS = new Set([
   'against', 'batch', 'verify', 'no-strict-flags',
   'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
   'allow-same-level', 'to', 'content-type', 'mention',
+  'wait', 'timeout',
 ]);
 
 /**
@@ -2611,6 +2612,60 @@ async function cmdBuildRerun(buildIdArg, flags, config) {
   const res = await build.queueBuild(config, project, payload, org);
   console.log('Build queued.\n');
   console.log(JSON.stringify(build.summarizeBuild(res, webBase), null, 2));
+  if (flags.wait) await waitAndReport(res.id, flags, config, project, org, webBase);
+}
+
+// Queue a FRESH run of a pipeline on a branch (the "Run pipeline" button), with the
+// pipeline's own defaults. Needs no earlier build on the branch, unlike `build rerun`.
+// Write op: previews by default; pass --yes to queue; --wait then follows it to the end.
+async function cmdBuildQueue(flags, config) {
+  const org = flags.org || config.org;
+  const project = needProject(flags, config);
+  const webBase = `${config.baseUrl}/${org}/${encodeURIComponent(project)}`;
+  if (!flags.definition || flags.definition === true) die('build queue needs --definition <id|name>.');
+  if (!flags.branch || flags.branch === true) die('build queue needs --branch <name> (e.g. main, releases/rc/2026_1).');
+  const definitionId = await build.resolveDefinitionId(config, project, flags.definition, org);
+  const payload = build.buildQueuePayload({ definitionId, branch: flags.branch });
+
+  if (!flags.yes) {
+    console.log('DRY RUN — no build queued. Re-run with --yes to queue.\n');
+    console.log(JSON.stringify({ project, willQueue: payload }, null, 2));
+    return;
+  }
+
+  const res = await build.queueBuild(config, project, payload, org);
+  console.log('Build queued.\n');
+  console.log(JSON.stringify(build.summarizeBuild(res, webBase), null, 2));
+  if (flags.wait) await waitAndReport(res.id, flags, config, project, org, webBase);
+}
+
+// Follow a build until it completes. Exit 0 only on result "succeeded".
+async function cmdBuildWait(buildIdArg, flags, config) {
+  const org = flags.org || config.org;
+  const project = needProject(flags, config);
+  const webBase = `${config.baseUrl}/${org}/${encodeURIComponent(project)}`;
+  if (!buildIdArg || !/^\d+$/.test(buildIdArg)) die('build wait needs a numeric <buildId>.');
+  await waitAndReport(parseInt(buildIdArg, 10), flags, config, project, org, webBase);
+}
+
+async function waitAndReport(id, flags, config, project, org, webBase) {
+  const minutes = flagValue(flags.timeout) != null ? Number(flags.timeout) : 60;
+  if (!Number.isFinite(minutes) || minutes <= 0) die('--timeout takes a number of minutes greater than 0.');
+  let last = '';
+  const { build: b, timedOut } = await build.waitForBuild(id, {
+    get: (bid) => build.getBuild(config, project, bid, org),
+    timeoutMs: minutes * 60000,
+    onTick: (cur) => {
+      const s = `${cur.status}${cur.result ? '/' + cur.result : ''}`;
+      if (s !== last) { process.stderr.write(`build ${id} (${cur.buildNumber}): ${s}\n`); last = s; }
+    },
+  });
+  console.log(`\nBuild ${timedOut ? 'still running after ' + minutes + ' min' : 'finished'}.\n`);
+  console.log(JSON.stringify(build.summarizeBuild(b, webBase), null, 2));
+  if (timedOut || !build.buildSucceeded(b)) {
+    process.stderr.write(`build ${id}: ${timedOut ? 'timed out waiting' : 'result ' + b.result}\n`);
+    process.exitCode = 1;
+  }
 }
 
 // ── misc / generic commands ──────────────────────────────────────────────────
@@ -3095,6 +3150,10 @@ Usage:
   azure-connector build rerun [<buildId>] --project <p> [--branch <b>] [--definition <id|name>] [--repo <r>] [--yes]   # re-queue a build with the SAME config/variables
                                    # generic across pipelines: replays the build's parameters + templateParameters (empty for pipelines without variables)
                                    # without <buildId>, re-runs the latest build matching the filters; previews by default, --yes to queue; --branch re-runs the same config on another ref
+                                   # --wait follows the new build to the end (exit 1 unless it succeeds)
+  azure-connector build queue --project <p> --definition <id|name> --branch <b> [--yes] [--wait] [--timeout <min>]  # queue a FRESH run of a pipeline on a branch (pipeline defaults)
+                                   # needs no earlier build on the branch; previews by default, --yes to queue
+  azure-connector build wait <buildId> --project <p> [--timeout <min>]   # wait until the build completes; exit 0 only on "succeeded" (default timeout 60 min)
 
 
 Configuration (in priority order):
@@ -3279,7 +3338,9 @@ async function main() {
     if (sub === 'list')  return cmdBuildList(flags, config);
     if (sub === 'last')  return cmdBuildLast(flags, config);
     if (sub === 'rerun') return cmdBuildRerun(arg1, flags, config);
-    die(`Unknown build subcommand: ${sub}. Try: build list | build last | build rerun`);
+    if (sub === 'queue') return cmdBuildQueue(flags, config);
+    if (sub === 'wait')  return cmdBuildWait(arg1, flags, config);
+    die(`Unknown build subcommand: ${sub}. Try: build list | build last | build rerun | build queue | build wait`);
   }
 
   die(`Unknown command: ${group}. Run azure-connector --help for usage.`);

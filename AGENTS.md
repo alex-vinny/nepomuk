@@ -227,8 +227,10 @@ effect the moment it is invoked.**
 | `wiki list|pages|get` | no | — |
 | `build list|last` | no | — |
 | `build rerun` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
+| `build queue` | **yes — triggers CI** | **requires `--yes`**; previews otherwise |
+| `build wait` | no | — |
 
-`build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi add-link`, `wi relink`, `wi unlink`, `wi attach`,
+`build rerun`, `build queue`, `wi create`, `wi create-task`, `wi create-tasks`, `wi add-link`, `wi relink`, `wi unlink`, `wi attach`,
 `wi detach`, `pr attach`, `pr complete` and `pr vote` are the only commands that refuse to act without `--yes`. Do not assume that
 convention elsewhere.
 
@@ -708,7 +710,9 @@ silently dropped.
 |---|---|---|
 | `build list` | `--project` (**required**), `--branch`, `--definition <id\|name>`, `--repo`, `--top <n>` (10), `--json` | Newest first. The Build API has no repo filter, so `--repo` narrows client-side by repository name. |
 | `build last` | same | The most recent match, in full, including its variables. |
-| `build rerun [<buildId>]` | `--project` (**required**), `--branch`, `--definition`, `--repo`, `--yes` | Re-queues with the **same config**: replays the source build's `parameters` and `templateParameters` verbatim. A pipeline without variables simply re-queues with none. Without a `<buildId>` it resolves the latest build matching the filters, so the new run picks up the branch's current HEAD. `--branch` re-runs the same config on another ref. **Previews unless `--yes`.** |
+| `build rerun [<buildId>]` | `--project` (**required**), `--branch`, `--definition`, `--repo`, `--yes` | Re-queues with the **same config**: replays the source build's `parameters` and `templateParameters` verbatim. A pipeline without variables simply re-queues with none. Without a `<buildId>` it resolves the latest build matching the filters, so the new run picks up the branch's current HEAD. `--branch` re-runs the same config on another ref. `--wait` follows the new build like `build wait`. **Previews unless `--yes`.** |
+| `build queue` | `--project` (**required**), `--definition <id\|name>` (**required**), `--branch` (**required**), `--yes`, `--wait`, `--timeout <min>` | Queues a **fresh** run of the pipeline on the branch with the pipeline's own defaults (the "Run pipeline" button). Needs no earlier build on that branch, which `build rerun` does. `--wait` follows it like `build wait`. **Previews unless `--yes`.** |
+| `build wait <buildId>` | `--project` (**required**), `--timeout <min>` (60) | Polls every 20 s until the build is `completed`; state changes go to stderr, the final summary to stdout. **Exit 0 only when the result is `succeeded`**; failed, partiallySucceeded, canceled or the timeout exit 1. |
 
 `--branch` accepts a short name (`features/x`) or a full ref (`refs/heads/features/x`).
 
@@ -772,7 +776,7 @@ same numbers.
 ## 11. Operating rules for an autonomous caller
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
-   no `--dry-run`. Only `build rerun`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`, `wi detach`,
+   no `--dry-run`. Only `build rerun`, `build queue`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`, `wi detach`,
    `pr attach`, `pr complete` and `pr vote` refuse to act without confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.

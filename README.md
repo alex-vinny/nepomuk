@@ -1626,6 +1626,14 @@ node index.js build rerun 40587 --project Platform --yes
 
 # Re-run the same config against a different ref
 node index.js build rerun 40587 --project Platform --branch releases/rc/202606_1 --yes
+
+# Queue a FRESH run of a pipeline on a branch (pipeline defaults; no earlier build on the branch needed).
+# Previews by default; --yes queues; --wait follows it and exits 1 unless it succeeds.
+node index.js build queue --project Platform --definition web-ui --branch releases/rc/202606_1
+node index.js build queue --project Platform --definition web-ui --branch releases/rc/202606_1 --yes --wait
+
+# Wait for a build already queued (exit 0 only on "succeeded"; --timeout in minutes, default 60)
+node index.js build wait 40588 --project Platform --timeout 30
 ```
 
 Notes:
@@ -1841,7 +1849,7 @@ azure-connector/
     ├── workitem.js   # Work item operations, attachment upload/download, change history
     ├── iteration.js  # Iterations (sprints) and their date windows
     ├── repo.js       # Repository metadata and refs
-    ├── build.js      # Pipeline build list/last/rerun (generic variable replay)
+    ├── build.js      # Pipeline build list/last/rerun (generic variable replay), queue and wait
     ├── links.js      # Canonical Azure DevOps URLs and reference lines
     ├── verify.js     # Fact-loss and unrenderable-markup checks
     └── format.js     # Pretty-print helpers
