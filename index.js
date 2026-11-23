@@ -13,11 +13,13 @@
  *   pr comments <pr-url>           List PR comment threads
  *   pr comment  <pr-url> --body-file <path> [--file <path> --line <n>] [--attach-images]   Add a PR comment (markdown file)
  *   pr reply        <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  Reply inside an existing thread (markdown file)
- *   pr edit-comment <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  Edit a comment in place (markdown file)
+ *   pr reply        <pr-url> --batch <manifest.json> [--expect-head <sha>] [--dry-run]  Reply to several threads, all validated first
+ *   pr edit-comment <pr-url> <threadId> --body-file <path> [--comment <n>] [--append] [--attach-images] [--dry-run]  Edit a comment in place (markdown file)
  *   pr attachments  <pr-url>       List attachments
  *   pr attach   <pr-url> <file>    Attach a local file (previews unless --yes)
  *   pr delete-thread <pr-url> <threadId> [--comment <n>]  Delete comment + close thread
  *   pr close-thread  <pr-url> <threadId>                  Close/resolve a thread
+ *   pr thread-status <pr-url> <threadId> <status> [--yes] Set a thread's status (previews unless --yes)
  *   wi get      <wi-url>           Get work item data
  *   wi comments <wi-url>           List work item comments
  *   wi comment  <wi-url> --body-file <path> [--field <ref>] [--as-comment] [--mention creator,assignee,<email>]  Add a comment (--mention notifies); if the WI has long-form custom fields, lists them and stops unless --field/--as-comment
@@ -160,7 +162,7 @@ const KNOWN_FLAGS = new Set([
   'against', 'batch', 'verify', 'no-strict-flags',
   'strategy', 'delete-source-branch', 'transition-work-items', 'message-file', 'bypass', 'auto',
   'allow-same-level', 'to', 'content-type', 'mention',
-  'wait', 'timeout',
+  'wait', 'timeout', 'append',
 ]);
 
 /**
@@ -1121,6 +1123,7 @@ async function cmdPrDeleteThread(rawUrl, threadIdStr, flags, config) {
 }
 
 async function cmdPrReply(rawUrl, threadIdStr, text, flags, config) {
+  if (flags.batch !== undefined) return cmdPrReplyBatch(rawUrl, threadIdStr, flags, config);
   if (!threadIdStr) die('Missing threadId argument. Get it via `pr comments`.');
   const threadId = parseInt(threadIdStr, 10);
   if (isNaN(threadId)) die(`Invalid threadId: ${threadIdStr}`);
@@ -1171,17 +1174,261 @@ async function cmdPrEditComment(rawUrl, threadIdStr, text, flags, config) {
   if (!content.trim()) die('Comment body file is empty.');
   const p = needPrUrlOrId(rawUrl, config, flags);
   const commentId = flags.comment ? parseInt(flags.comment, 10) : 1;
+  if (isNaN(commentId)) die(`Invalid --comment: ${flags.comment}`);
+  const append = !!flags.append;
+
+  // --append: the text is added to the END of the comment as it is now, so the current
+  // text is read first — from the listing of this PR, which also proves the thread is
+  // the PR's (Azure would edit a thread of another PR without a word).
+  let existing = null;
+  if (append) {
+    const thread = requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'updated');
+    const comment = pr.findThreadComment(thread, commentId);
+    if (!comment) {
+      die(`Comment ${commentId} is not in thread ${threadId} of PR #${p.prId} (or it was deleted). `
+        + 'Get the comment ids with `pr comments --json`. Nothing was updated.');
+    }
+    existing = comment.content == null ? '' : String(comment.content);
+  }
+
   const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
+  const finalBody = (added) => (append ? pr.appendCommentContent(existing, added) : added);
   if (flags['dry-run']) {
-    console.log(`DRY RUN — nothing updated. Would replace comment ${commentId} in thread ${threadId}.`);
-    const body = images ? images.preview : content;
+    console.log(append
+      ? `DRY RUN — nothing updated. Would append to comment ${commentId} in thread ${threadId} (${existing.length} chars kept).`
+      : `DRY RUN — nothing updated. Would replace comment ${commentId} in thread ${threadId}.`);
+    const body = finalBody(images ? images.preview : content);
     if (images) printImagePlan(images);
     console.log(`Body (${body.length} chars):\n${body}`);
     return;
   }
   if (images) content = await images.commit();
+  content = finalBody(content);
   await postAfterImages(images, () => pr.editComment({ config, ...p, threadId, commentId, content }));
-  console.log(`Comment ${commentId} in thread ${threadId} updated.`);
+  console.log(`Comment ${commentId} in thread ${threadId} ${append ? 'appended to' : 'updated'}.`);
+}
+
+/**
+ * The thread `threadId` from the listing of PR `prId`, or exit 1. Azure does not check that
+ * a thread id in the url belongs to that PR: a write with a thread id of another PR lands
+ * on the other PR, silently. `what` completes "Nothing was ___." in the message.
+ */
+function requirePrThread(threadsResp, threadId, prId, what) {
+  const found = pr.findPrThread(threadsResp, threadId);
+  if (found.reason === 'not-on-pr') {
+    die(`Thread ${threadId} is not on PR #${prId}. Azure would accept the write and apply it to whichever PR `
+      + `owns that thread. Take the id from \`pr comments ${prId}\`. Nothing was ${what}.`);
+  }
+  if (found.reason === 'deleted') die(`Thread ${threadId} on PR #${prId} is deleted. Nothing was ${what}.`);
+  return found.thread;
+}
+
+function threadWhere(thread) {
+  const ctx = thread && thread.threadContext;
+  if (!ctx || !ctx.filePath) return 'PR-level';
+  const line = (ctx.rightFileStart && ctx.rightFileStart.line) || (ctx.leftFileStart && ctx.leftFileStart.line);
+  return `${ctx.filePath}${line ? `:${line}` : ''}`;
+}
+
+/**
+ * PATCH a thread's status, then read the thread back: a 200 on the PATCH is not proof the
+ * PR shows it. Throws when the status Azure kept is not the one sent.
+ */
+async function setThreadStatusChecked({ config, p, threadId, status }) {
+  await pr.updateThread({ config, ...p, threadId, status });
+  const after = await pr.getThread({ config, ...p, threadId });
+  if (!after || !pr.sameThreadStatus(after.status, status)) {
+    throw new Error(`Azure accepted the request but thread ${threadId} on PR #${p.prId} shows status `
+      + `"${after && after.status != null ? after.status : '(none)'}", not "${status}". Check it in the web UI.`);
+  }
+}
+
+/**
+ * `pr thread-status <url|id> <threadId> <status>` — set a thread's status.
+ *
+ * Without --yes it prints the current and new status and exits. The thread must be in the
+ * listing of the PR in the url (see requirePrThread); the status is read back after the write.
+ * Replaces `raw PATCH .../threads/{id}`, which has neither check.
+ */
+async function cmdPrThreadStatus(rawUrl, threadIdStr, statusArg, flags, config) {
+  const usage = `Usage: pr thread-status <pr-url|id> <threadId> <${pr.THREAD_STATUSES.join('|')}> [--yes]`;
+  if (!threadIdStr || threadIdStr === true) die(`Missing threadId argument. ${usage}`);
+  const threadId = parseInt(threadIdStr, 10);
+  if (isNaN(threadId) || String(threadId) !== String(threadIdStr).trim()) die(`Invalid threadId: ${threadIdStr}`);
+  if (statusArg === undefined || statusArg === true) die(`Missing status. ${usage}`);
+  let status;
+  try { status = pr.parseThreadStatus(statusArg); } catch (e) { die(e.message); }
+
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  const thread = requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'written');
+  const current = thread.status == null ? null : thread.status;
+  console.log(`PR #${p.prId} · thread ${threadId} (${threadWhere(thread)})`);
+  console.log(`  status: ${current === null ? '(none)' : current} → ${status}`);
+
+  if (pr.sameThreadStatus(current, status)) {
+    console.log('\nThe thread is already in that status — nothing to change.');
+    return;
+  }
+  if (!flags.yes) {
+    console.log('\nDRY RUN — nothing was written. Re-run with --yes to set the status.');
+    return;
+  }
+  try {
+    await setThreadStatusChecked({ config, p, threadId, status });
+  } catch (e) { die(e.message); }
+  console.log(`\nThread ${threadId} on PR #${p.prId} is now ${status}.`);
+}
+
+/**
+ * `pr reply --batch <manifest.json>` — answer several existing threads in one command.
+ *
+ * Same contract as `pr comment --batch`: every item is validated — each thread is on THIS
+ * PR, each parent comment exists, each body file exists, is not empty and points at no
+ * local image, each status is valid — and the head is checked against --expect-head,
+ * before the first reply is posted. Replies posted one by one used to cross with a push
+ * by the author; the head check holds them all back instead.
+ *
+ * Manifest: an array, or { expectHead, replies: [...] }.
+ * Each item: { thread, bodyFile, status?, comment? } — bodyFile relative to the manifest,
+ * comment = parent comment id (default 1), status set after the reply and read back.
+ */
+async function cmdPrReplyBatch(rawUrl, threadIdStr, flags, config) {
+  const manifestPath = flags.batch;
+  if (manifestPath === true || !String(manifestPath).trim()) die('--batch needs the path of a manifest file.');
+  if (threadIdStr !== undefined && threadIdStr !== true) {
+    die('pr reply --batch takes no <threadId>: the manifest names the threads. Nothing was posted.');
+  }
+  for (const f of ['body-file', 'comment', 'attach-images']) {
+    if (flags[f] !== undefined) {
+      die(`--${f} does not apply to pr reply --batch (set "bodyFile"/"comment" per item; a batch uploads no images). Nothing was posted.`);
+    }
+  }
+  if (flags['expect-head'] === true) {
+    die('--expect-head needs the commit sha the replies were written against, e.g. --expect-head b31b63dc89.');
+  }
+
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
+  catch (e) { die(`Could not read --batch "${manifestPath}": ${e.message}`); }
+  const items = Array.isArray(manifest) ? manifest : ((manifest && manifest.replies) || []);
+  if (!Array.isArray(items) || !items.length) die(`--batch "${manifestPath}" contains no replies.`);
+  const expectHead = flags['expect-head'] !== undefined
+    ? flags['expect-head'] : (Array.isArray(manifest) ? null : manifest.expectHead);
+  if (expectHead && pr.checkExpectedHead('', expectHead).reason === 'malformed') {
+    die(`expect-head "${expectHead}" is not a commit sha (expected 7-40 hex characters). Nothing was posted.`);
+  }
+  const base = path.dirname(path.resolve(manifestPath));
+
+  // ── phase 1: validate everything, post nothing ────────────────────────────
+  const problems = [];
+  const prepared = [];
+  for (const [i, item] of items.entries()) {
+    const label = `#${i + 1}`;
+    try {
+      if (!item || typeof item !== 'object') throw new Error('item is not an object');
+      const threadId = Number(item.thread);
+      if (!Number.isInteger(threadId) || threadId <= 0) throw new Error(`"thread" must be a thread id, got ${JSON.stringify(item.thread)}`);
+      const parentCommentId = item.comment == null ? 1 : Number(item.comment);
+      if (!Number.isInteger(parentCommentId) || parentCommentId <= 0) {
+        throw new Error(`"comment" must be a comment id, got ${JSON.stringify(item.comment)}`);
+      }
+      const status = item.status == null ? null : pr.parseThreadStatus(item.status);
+      if (!item.bodyFile) throw new Error('missing "bodyFile"');
+      const bodyPath = path.isAbsolute(item.bodyFile) ? item.bodyFile : path.join(base, item.bodyFile);
+      const content = fs.readFileSync(bodyPath, 'utf8');
+      if (!content.trim()) throw new Error(`body file "${item.bodyFile}" is empty`);
+      const localImages = pr.findLocalImageRefs(content, { baseDir: path.dirname(bodyPath) });
+      if (localImages.length) {
+        throw new Error(`body points at local image(s) (${localImages.map((r) => r.ref).join(', ')}), which a batch `
+          + 'does not upload; post that reply alone with `pr reply --attach-images`');
+      }
+      prepared.push({ label, threadId, parentCommentId, status, content });
+    } catch (e) {
+      problems.push({ label, thread: item && item.thread, message: e.message });
+    }
+  }
+
+  const p = needPrUrlOrId(rawUrl, config, flags);
+  let head = null;
+  if (expectHead) {
+    head = pr.latestHeadCommit(await pr.getIterations({ config, ...p }));
+    const v = pr.checkExpectedHead(head, expectHead);
+    if (!v.ok) {
+      die(`PR #${p.prId} head has MOVED since the replies were written.\n`
+        + `  expected: ${v.expected}\n  current:  ${v.actual || '(unknown)'}\n`
+        + `Nothing was posted — all ${items.length} reply(ies) were held back. Read the new commits, `
+        + 'check the replies still hold, then re-run against the new head.');
+    }
+  }
+  console.error(`Validating ${items.length} reply(ies) against PR #${p.prId}${head ? ` at head ${String(head).slice(0, 10)}` : ''}…`);
+
+  const threads = await pr.getComments({ config, ...p });
+  for (const r of prepared) {
+    const found = pr.findPrThread(threads, r.threadId);
+    if (!found.ok) {
+      problems.push({ label: r.label, thread: r.threadId, message: found.reason === 'deleted'
+        ? 'the thread is deleted'
+        : `thread ${r.threadId} is not on PR #${p.prId} (Azure would post it on the PR that owns it)` });
+      continue;
+    }
+    if (!pr.findThreadComment(found.thread, r.parentCommentId)) {
+      problems.push({ label: r.label, thread: r.threadId, message: `comment ${r.parentCommentId} is not in thread ${r.threadId} (or it was deleted)` });
+      continue;
+    }
+    r.where = threadWhere(found.thread);
+    r.currentStatus = found.thread.status == null ? null : found.thread.status;
+  }
+
+  if (problems.length) {
+    problems.sort((a, b) => Number(a.label.slice(1)) - Number(b.label.slice(1)));
+    die(`${problems.length} of ${items.length} reply(ies) failed validation:\n`
+      + problems.map((x) => `  ${x.label} thread ${x.thread ?? '?'} — ${x.message}`).join('\n')
+      + '\nNothing was posted. Fix the manifest and re-run.');
+  }
+  console.error(`  ✓ all ${prepared.length} reply(ies) valid.`);
+
+  const statusNote = (r) => {
+    if (!r.status) return '';
+    return pr.sameThreadStatus(r.currentStatus, r.status)
+      ? `, status already ${r.status}`
+      : `, then status ${r.currentStatus == null ? '(none)' : r.currentStatus} → ${r.status}`;
+  };
+  if (flags['dry-run']) {
+    console.log(`DRY RUN — ${prepared.length} reply(ies) would be posted to PR #${p.prId}:`);
+    for (const r of prepared) {
+      console.log(`  ${r.label} thread ${r.threadId} (${r.where}) to comment ${r.parentCommentId}  (${r.content.length} chars)${statusNote(r)}`);
+    }
+    return;
+  }
+
+  // ── phase 2: post ─────────────────────────────────────────────────────────
+  const done = [];
+  for (const r of prepared) {
+    let step = 'reply';
+    try {
+      const res = await pr.replyToThread({ config, ...p, threadId: r.threadId, content: r.content, parentCommentId: r.parentCommentId });
+      const entry = { label: r.label, threadId: r.threadId, commentId: res && res.id, status: null };
+      done.push(entry);
+      console.log(`  ${r.label} replied in thread ${r.threadId} — comment ${entry.commentId}`);
+      if (r.status && !pr.sameThreadStatus(r.currentStatus, r.status)) {
+        step = 'status';
+        await setThreadStatusChecked({ config, p, threadId: r.threadId, status: r.status });
+        entry.status = r.status;
+        console.log(`  ${r.label} thread ${r.threadId}: ${r.currentStatus == null ? '(none)' : r.currentStatus} → ${r.status}`);
+      }
+    } catch (e) {
+      // Validation passed, so this is a transport/permission problem. Say exactly what
+      // landed: re-running the whole batch would post those replies a second time.
+      console.error(`\n  ${r.label} FAILED ${step === 'reply'
+        ? 'posting the reply'
+        : `setting status ${r.status} (its reply WAS posted)`}: ${e.message}`);
+      console.error('  Already posted (do NOT re-run the whole batch — you would duplicate these):');
+      done.forEach((x) => console.error(`    ${x.label} thread ${x.threadId} comment ${x.commentId}${x.status ? ` (status ${x.status})` : ''}`));
+      process.exitCode = 1;
+      return;
+    }
+  }
+  console.log(`\n${done.length} reply(ies) posted to PR #${p.prId}.`);
 }
 
 async function cmdPrCloseThread(rawUrl, threadIdStr, config, flags = {}) {
@@ -3083,7 +3330,11 @@ Usage:
   azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate] [--attach-images]   # Markdown file; inline text is not supported
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
   azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
-  azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
+  azure-connector pr reply         <pr-url> --batch <manifest.json> [--expect-head <sha>] [--dry-run]
+                                   # answer several threads: every thread checked to be on THIS PR, every body file read, the head checked,
+                                   # before the first post; manifest = [{ thread, bodyFile, status?, comment? }] or { expectHead, replies: [...] }
+  azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--append] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
+                                   # --append adds the file to the END of the current text (one blank line between) instead of replacing it; default comment 1
   azure-connector pr set-desc      <pr-url> [--body-file <path>] [--base-file <path>] [--title "<text>"] [--target <branch>] [--attach-images] [--dry-run]   # update PR description/title/target branch in place (target must exist; --base-file = the description you edited, refused if the live one moved)
                                    # --attach-images: a body with ![alt](./local.png) uploads each image to the PR and links it;
                                    # without the flag such a body is refused (Azure would show a broken image)
@@ -3098,7 +3349,9 @@ Usage:
                                    # sets YOUR vote (the PAT's identity); previews unless --yes; read back after the write; 0 clears the vote
   azure-connector pr delete-thread <pr-url> <threadId> [--comment <n>]
   azure-connector pr close-thread  <pr-url> <threadId>
-  azure-connector pr timeline      <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas
+  azure-connector pr thread-status <pr-url|pr-id> <threadId> <active|fixed|wontFix|closed|byDesign|pending> [--yes]
+                                   # previews unless --yes; refuses a thread that is not on this PR; read back after the write
+  azure-connector pr timeline     <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas
   azure-connector pr timeline      --repo <r> [--project <p>] [--status all|active|completed] [--top <n>] [--json]
                                    # review health for a whole repo: age, days-to-first-vote, and PRs merged with NO vote
 
@@ -3286,6 +3539,7 @@ async function main() {
     if (sub === 'vote')          return cmdPrVote(arg1, arg2, flags, config);
     if (sub === 'delete-thread') return cmdPrDeleteThread(arg1, arg2, flags, config);
     if (sub === 'close-thread')  return cmdPrCloseThread(arg1, arg2, config, flags);
+    if (sub === 'thread-status') return cmdPrThreadStatus(arg1, arg2, arg3, flags, config);
     if (sub === 'attachments')   return cmdPrAttachments(arg1, config, flags);
     if (sub === 'attach')        return cmdPrAttach(arg1, arg2, flags, config);
     if (sub === 'timeline')      return cmdPrTimeline(arg1, flags, config);

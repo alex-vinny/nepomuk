@@ -79,8 +79,9 @@ ERROR: --json is not supported by "pr diff" — nothing was run. ...
 Two cases set exit **1** after partial work, and both say so explicitly on stderr:
 
 - `wi set-state` when the rule engine rejects the transition — nothing was written.
-- `pr comment --batch` when a post fails *after* validation passed — the thread ids that
-  already landed are printed. Do not re-run the whole batch.
+- `pr comment --batch` and `pr reply --batch` when a post fails *after* validation passed —
+  what already landed (thread ids, or reply comment ids and the statuses set) is printed. Do
+  not re-run the whole batch.
 
 ---
 
@@ -205,9 +206,11 @@ effect the moment it is invoked.**
 | `pr create` | **yes** | none |
 | `pr comment` | **yes** | `--dry-run`; also `--expect-head`, duplicate detection, anchor validation; a local image in the body is refused unless `--attach-images` |
 | `pr comment --batch` | **yes** | `--dry-run`; all-or-nothing validation; a local image is refused (no upload in a batch) |
-| `pr reply`, `pr edit-comment`, `pr set-desc` | **yes** | `--dry-run`; a local image in the body is refused unless `--attach-images` |
+| `pr reply`, `pr edit-comment`, `pr set-desc` | **yes** | `--dry-run`; a local image in the body is refused unless `--attach-images`. `edit-comment --append` reads the comment from the PR's own thread listing first, so a thread of another PR is refused |
+| `pr reply --batch` | **yes** | `--dry-run`; all-or-nothing validation (every thread on **this** PR, every parent comment, body file and status); `--expect-head`; a local image is refused (no upload in a batch); a status is read back after it is set |
 | `pr attach` | **yes** | **requires `--yes`**; previews otherwise |
 | `pr abandon`, `pr delete-thread`, `pr close-thread` | **yes** | none |
+| `pr thread-status` | **yes** | **requires `--yes`**; previews otherwise. Refuses a thread that is not in the PR's own thread listing; reads the thread back after the write |
 | `pr complete` | **yes** | **requires `--yes`**; previews otherwise. Refuses an inactive/draft/conflicting PR, pending policies without `--bypass`/`--auto`, and `--bypass` over a negative vote without `--force` |
 | `pr vote` | **yes** — the PAT identity's vote | **requires `--yes`**; previews otherwise. Refuses an inactive PR and, with `--expect-head`, a moved head; reads the PR back after the write |
 | `wi get|search|fields|field|layout|comments|updates|relations|missing|link` | no | — |
@@ -231,7 +234,7 @@ effect the moment it is invoked.**
 | `build wait` | no | — |
 
 `build rerun`, `build queue`, `wi create`, `wi create-task`, `wi create-tasks`, `wi add-link`, `wi relink`, `wi unlink`, `wi attach`,
-`wi detach`, `pr attach`, `pr complete` and `pr vote` are the only commands that refuse to act without `--yes`. Do not assume that
+`wi detach`, `pr attach`, `pr complete`, `pr vote` and `pr thread-status` are the only commands that refuse to act without `--yes`. Do not assume that
 convention elsewhere.
 
 ---
@@ -455,8 +458,9 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr diff <url\|id>` | `--project`, `--repo`, `--full` (alias `--content`), `--patch` (no-op) | Prints the changed-file list, then a unified diff per file. `--full` dumps each changed file's whole contents from the source branch instead. Line numbers in the diff are the right-hand ones `pr comment --line` expects. |
 | `pr comments <url\|id>` | `--project`, `--repo`, `--json` | Lists active threads with author, date, file location and content. Source of `<threadId>`. `--json` emits `[{id, status, filePath, line, publishedDate, comments: [{id, parentCommentId, author, publishedDate, commentType, content}]}]`; `author` is the display name — the e-mail Azure returns is not copied. Deleted threads/comments are left out; system threads stay. |
 | `pr comment <url\|id>` | `--body-file` (**required**), `--file`, `--line`, `--dry-run`, `--expect-head <sha>`, `--allow-duplicate`, `--no-validate`, `--batch <manifest>` | See §8.3–8.5. Markdown body. `--line` is a right-hand file line number. **Writes.** |
-| `pr reply <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (parent, default 1), `--attach-images`, `--dry-run` | Replies inside an existing thread. **Writes.** |
-| `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1), `--attach-images`, `--dry-run` | Edits in place. **Writes.** |
+| `pr reply <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (parent, default 1), `--attach-images`, `--dry-run` | Replies inside an existing thread. Azure does not check that the thread is the PR's: take the id from `pr comments` of the same PR. **Writes.** |
+| `pr reply <url\|id> --batch <manifest>` | `--expect-head <sha>`, `--dry-run` | Several replies, all validated before the first post. See below. **Writes.** |
+| `pr edit-comment <url\|id> <threadId>` | `--body-file` (**required**), `--comment <n>` (default 1), `--append`, `--attach-images`, `--dry-run` | Edits in place. Without `--append` the body **replaces** the comment. With `--append` the comment is read first (from the PR's own thread listing, so a thread of another PR is refused) and the body is added at its **end**, after one blank line; `--dry-run` prints the whole resulting text. Without `--comment` it is comment 1 either way. **Writes.** |
 | `pr set-desc <url\|id> ["<text>"]` | `--body-file`, `--title`, `--attach-images`, `--dry-run` | Replaces description and/or renames. Use it to resync a description after later commits change the implementation. Same 4000-character cap, counted **with** the image urls. **Writes.** |
 | `pr attachments <url\|id>` | `--project`, `--repo`, `--json` | Index, name, date, author name, url. The author e-mail Azure returns is not printed, not even in `--json`. |
 | `pr attach <url\|id> <file>` | `--name <n>`, `--yes`, `--json` | Uploads the file as a PR attachment and prints the url plus a ready `![name](url)` line. **Previews unless `--yes`.** See below. **Writes.** |
@@ -465,6 +469,7 @@ Flags are listed per command. `--json` always means "machine-readable on stdout"
 | `pr vote <url\|id> <vote>` | `--expect-head <sha>`, `--yes`, `--project`, `--repo` | `<vote>` is `10`/`approve`, `5`/`approve-with-suggestions`, `0`/`reset`, `-5`/`wait-for-author`, `-10`/`reject`; anything else exits 1. Sets the vote of the PAT's identity (`pat check` shows it), adding it as reviewer if needed. Without `--yes` prints the current and new vote. Refuses an inactive PR and a head that moved past `--expect-head`. The same vote again is a no-op. After the write the PR is read back; a vote Azure did not keep exits 1. **Writes only with `--yes`.** |
 | `pr delete-thread <url\|id> <threadId>` | `--comment <n>` (default 1) | Deletes the comment, then closes the thread. A failed delete is a warning; the close still runs. **Writes, no dry-run.** |
 | `pr close-thread <url\|id> <threadId>` | — | Marks the thread closed. **Writes, no dry-run.** |
+| `pr thread-status <url\|id> <threadId> <status>` | `--yes`, `--project`, `--repo` | `<status>` is `active`, `fixed`, `wontFix`, `closed`, `byDesign` or `pending` (any case); anything else exits 1 before any request. Without `--yes` prints the thread, its current and new status. Refuses, before writing, a thread that is not in this PR's thread listing — Azure would apply the PATCH to the PR that owns it. The same status again is a no-op. After the write the thread is read back; a status Azure did not keep exits 1. Use it instead of `raw PATCH .../threads/{id}`, which has neither check. **Writes only with `--yes`.** |
 | `pr link <url\|id>` | `--wi <id>`, `--no-wi` | Prints the canonical reference line, with the **project resolved from the PR's own repository object** rather than assumed. Read-only. |
 | `pr timeline <url\|id>` | `--json` | created → published → every vote → completed, with day deltas. |
 | `pr timeline --repo <r>` | `--project` (**required**), `--status` (default `all`), `--top <n>` (50), `--json` | Review health across a repo. |
@@ -495,6 +500,40 @@ Manifest — an array, or an object carrying an expected head:
 - Post failure *after* validation: exit **1**, and the already-posted thread ids are
   printed. **Do not re-run the whole batch** — you would duplicate them.
 - `--dry-run` prints what would be posted and where.
+
+#### `pr reply --batch <manifest.json>`
+
+Answers several existing threads in one command, with the contract of `pr comment --batch`:
+**every** item is validated, and the head checked, before the first reply is posted. Replies
+sent one at a time cross with a push by the author; with `--expect-head` they are all held back
+instead.
+
+```json
+{
+  "expectHead": "b31b63dc89",
+  "replies": [
+    { "thread": 1201, "bodyFile": "replies/01-fixed.md", "status": "fixed" },
+    { "thread": 1202, "bodyFile": "replies/02-by-design.md", "status": "byDesign", "comment": 2 },
+    { "thread": 1203, "bodyFile": "replies/03-question.md" }
+  ]
+}
+```
+
+- `thread` and `bodyFile` are **required** per item. `bodyFile` resolves relative to the
+  manifest's directory. `comment` is the parent comment (default `1`). `status` is optional,
+  same values as `pr thread-status`, set **after** the reply and read back; a thread already in
+  that status is left alone.
+- Validation: each thread is in **this PR's** thread listing and not deleted, the parent comment
+  exists in it, the body file exists, is not empty and points at no local image, the status is
+  valid. Any failure: exit **1**, every problem listed, nothing posted.
+- `--expect-head` on the command line overrides `expectHead` in the manifest. A moved head:
+  exit **1**, nothing posted. A malformed sha is refused before any request.
+- A positional `<threadId>`, `--body-file`, `--comment` or `--attach-images` next to `--batch`
+  is refused rather than ignored.
+- Post failure *after* validation: exit **1**, and the replies already posted are printed (with
+  the status, when it was set). A status that failed after its reply landed is reported as
+  such. **Do not re-run the whole batch.**
+- `--dry-run` prints each reply, its thread location and the status change.
 
 #### Azure's vote scale
 
@@ -777,7 +816,7 @@ same numbers.
 
 1. **Check §6 before every call.** Most writes are not gated behind `--yes`, and most have
    no `--dry-run`. Only `build rerun`, `build queue`, `wi create`, `wi create-task`, `wi create-tasks`, `wi attach`, `wi detach`,
-   `pr attach`, `pr complete` and `pr vote` refuse to act without confirmation.
+   `pr attach`, `pr complete`, `pr vote` and `pr thread-status` refuse to act without confirmation.
 2. **Read the exit code, not the presence of stderr output.** Warnings, retries and notes
    all go to stderr on success.
 3. **Treat exit 2 as a question, not a failure.** Re-issue with `--field <ref>` or
@@ -812,8 +851,8 @@ same numbers.
 npm test      # or: node --test
 ```
 
-309 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
-two kinds. The transport, comment, `wi detach`, `pr attach`, `pr vote` and hierarchy/relink tests drive the lib or the CLI
+345 tests, Node's built-in `node:test`. **No Azure, no PAT.** Every test is pure except
+two kinds. The transport, comment, `wi detach`, `pr attach`, `pr vote`, PR thread and hierarchy/relink tests drive the lib or the CLI
 against a throwaway `127.0.0.1` server on an ephemeral port — the only way to assert that a
 binary body leaves as bytes, that an error Azure returns *after* storing a comment is reported
 as stored, and that a vote is read back after the write. The `wi create` tests spawn the CLI in
@@ -828,6 +867,7 @@ config or reach a real org.
 | `test/guardrails.test.js` | Duplicate detection, head-movement detection, project-from-Area-path, the canonical link lines, and the field-write verifier including the 8192-byte truncation signature. |
 | `test/hierarchy.test.js` | The same-level hierarchy guard (levels from the backlog configuration, `bugsBehavior` on/off, `--team`, `--allow-same-level` without reads), `wi relink`/`wi unlink` (link picking, the pinned PATCH, a stale revision writing nothing) and the `raw` Content-Type, pure and through the CLI against a fake Azure: `wi create --parent`, `create-task`, `add-link`, `relink`, `unlink`, `raw PATCH`. |
 | `test/pr-vote.test.js` | `pr vote` (vote parsing, blockers for a closed PR and a moved head, preview writes nothing, `--yes` writes once and reads back, a vote Azure did not keep fails), `pr comments --json` (no author e-mail), and the `--json` guard on text-only commands. |
+| `test/pr-threads.test.js` | `pr thread-status` (status parsing, an invalid status makes no request, preview writes nothing, `--yes` writes once and reads back, a thread of another PR is refused, a status Azure did not keep fails), `pr reply --batch` (one invalid item posts nothing and every problem is listed, a moved head posts nothing, a failure mid-batch lists what landed) and `pr edit-comment --append` (original text kept, `--comment`, missing comment and foreign thread refused), against a fake Azure that, like the real one, does not check thread ownership. |
 
 The cases worth knowing are the ones asserting what must **not** count: a same-value
 rewrite is not a state transition, a year-9999 date is no date, a human comment reading

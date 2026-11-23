@@ -478,6 +478,39 @@ parent comment (default 1). Markdown body, `--body-file` only.
 > ⚠️ **Azure does not check that the thread belongs to the PR in the URL.** A thread id from another PR is accepted
 > and the reply lands on that other PR, silently (seen twice: replies posted on another team's PR). Take the id from
 > `pr comments` of the same PR right before replying. The same holds for `edit-comment` and any raw PATCH on a thread.
+> `pr reply --batch`, `pr edit-comment --append` and `pr thread-status` check it for you: a thread that is not in the
+> PR's own listing is refused before anything is written.
+
+##### Answer several threads at once (`--batch`)
+
+```bash
+node index.js pr reply <pr-url> --batch ./replies/manifest.json --dry-run
+node index.js pr reply <pr-url> --batch ./replies/manifest.json --expect-head b31b63dc89
+```
+
+```json
+{
+  "expectHead": "b31b63dc89",
+  "replies": [
+    { "thread": 1201, "bodyFile": "01-fixed.md", "status": "fixed" },
+    { "thread": 1202, "bodyFile": "02-by-design.md", "status": "byDesign", "comment": 2 },
+    { "thread": 1203, "bodyFile": "03-question.md" }
+  ]
+}
+```
+
+Same contract as `pr comment --batch`: **everything** is checked before the first reply goes
+out — each thread is on this PR, each parent comment (`comment`, default 1) exists, each body
+file exists, is not empty and points at no local image, each `status` is valid. One bad item
+and nothing is posted; every problem is listed.
+
+The expected head (`expectHead` in the manifest, or `--expect-head`, which wins) is the reason
+this exists: replies posted one by one while the author pushes end up answering code that is no
+longer there. A moved head holds every reply back.
+
+`status` (`active`, `fixed`, `wontFix`, `closed`, `byDesign`, `pending`) is set after its
+reply and read back. If a post fails after validation passed, the replies that already landed
+are printed — **do not re-run the whole batch**, you would post them twice.
 
 ---
 
@@ -490,6 +523,35 @@ node index.js pr edit-comment <pr-url> <threadId> --body-file ./review.md --comm
 
 Edits require `--body-file` with a Markdown body. Inline text arguments are not supported.
 Thread IDs come from `pr comments`. `--comment <n>` targets a comment other than the first in the thread.
+
+```bash
+# Add to the end of the comment instead of replacing it (e.g. "Update: fixed in abc123")
+node index.js pr edit-comment <pr-url> <threadId> --body-file ./update.md --append --dry-run
+node index.js pr edit-comment <pr-url> <threadId> --body-file ./update.md --append --comment 2
+```
+
+`--append` reads the comment as it is now and writes it back with the file's text after one
+blank line, so the original wording is never retyped (or lost). `--dry-run` prints the whole
+resulting text. Without `--comment` it edits comment 1, as a plain edit does. The thread must be
+in the PR's own listing.
+
+---
+
+#### Set a thread's status
+
+```bash
+# Preview: the thread, its current status and the new one
+node index.js pr thread-status <pr-url|pr-id> <threadId> fixed
+
+# Write it
+node index.js pr thread-status <pr-url|pr-id> <threadId> wontFix --yes
+```
+
+Statuses: `active`, `fixed`, `wontFix`, `closed`, `byDesign`, `pending` (case does not matter).
+Anything else exits 1 before any request. Without `--yes` nothing is written. A thread that is
+not on the PR in the URL is refused — Azure itself would PATCH whichever PR owns it. After the
+write the thread is read back, and a status Azure did not keep is an error. Asking for the
+status the thread already has changes nothing. Use this instead of `raw PATCH` on a thread.
 
 ---
 
@@ -1808,6 +1870,8 @@ All calls use API version `7.1`. Key endpoints used:
 | List PR threads | GET | `/_apis/git/repositories/{repo}/pullRequests/{prId}/threads` |
 | Add PR thread | POST | `/_apis/git/repositories/{repo}/pullRequests/{prId}/threads` |
 | Edit PR comment | PATCH | `/_apis/git/repositories/{repo}/pullRequests/{prId}/threads/{threadId}/comments/{commentId}` |
+| Reply in a PR thread | POST | `/_apis/git/repositories/{repo}/pullRequests/{prId}/threads/{threadId}/comments` |
+| Get / set PR thread status | GET / PATCH | `/_apis/git/repositories/{repo}/pullRequests/{prId}/threads/{threadId}` (the thread id is **not** checked against `{prId}`) |
 | Get work item | GET | `/_apis/wit/workItems/{id}?$expand=all` |
 | List WI comments | GET | `/_apis/wit/workItems/{id}/comments` |
 | Add WI comment | POST | `/_apis/wit/workItems/{id}/comments` |
@@ -1841,7 +1905,8 @@ azure-connector/
 │   ├── connector.test.js   # unit tests (node:test)
 │   ├── analytics.test.js   # unit tests for the measurement helpers
 │   ├── guardrails.test.js  # unit tests for the pre-write guards
-│   └── pr-vote.test.js     # pr vote, pr comments --json, the --json guard
+│   ├── pr-vote.test.js     # pr vote, pr comments --json, the --json guard
+│   └── pr-threads.test.js  # pr thread-status, pr reply --batch, pr edit-comment --append
 └── lib/
     ├── config.js     # PAT/org config, URL parser
     ├── api.js        # HTTP transport (no external deps)
@@ -1884,3 +1949,9 @@ everything else refused), the blockers (closed PR, moved head), the comment summ
 the author e-mail, which commands accept `--json`, and the CLI end to end against a fake Azure on
 an ephemeral port — the preview writes nothing, `--yes` writes once and reads the PR back, a vote
 Azure did not keep is a failure, and `--json` on a text-only command is refused before any request.
+
+`pr-threads.test.js` covers `pr thread-status`, `pr reply --batch` and `pr edit-comment --append`
+against a fake Azure that, like the real one, accepts a thread id of another PR: an invalid status
+makes no request, the preview writes nothing, `--yes` writes once and reads the thread back, a
+foreign thread is refused, one bad batch item or a moved head posts nothing, a failure mid-batch
+lists what landed, and `--append` keeps the original text.
