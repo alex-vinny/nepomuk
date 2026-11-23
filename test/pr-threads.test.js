@@ -100,14 +100,14 @@ function fakeAzure() {
       m = url.match(new RegExp(`^${prefix}/threads/(\\d+)/comments$`));
       if (m && req.method === 'POST') {
         if (state.failReplyOn === Number(m[1])) return json(res, 403, { message: 'fake: permission denied' });
-        const t = state.threads[m[1]];
+        const t = state.threads[m[1]] || { comments: [] }; // like Azure: a thread of another PR is accepted
         const c = { id: t.comments.length + 1, parentCommentId: body.parentCommentId, content: body.content, commentType: 'text' };
         t.comments.push(c);
         return json(res, 200, c);
       }
       m = url.match(new RegExp(`^${prefix}/threads/(\\d+)/comments/(\\d+)$`));
       if (m && req.method === 'PATCH') {
-        const c = state.threads[m[1]].comments.find((x) => x.id === Number(m[2]));
+        const c = (state.threads[m[1]] || { comments: [] }).comments.find((x) => x.id === Number(m[2])) || {};
         c.content = body.content;
         return json(res, 200, c);
       }
@@ -213,7 +213,7 @@ test('pr reply --batch (CLI): --dry-run validates and lists, writes nothing; the
   assert.match(dry.stdout, /#3 thread 13 .*status already fixed/);
   assert.deepStrictEqual(state.writes, []);
 
-  const res = await cli('pr', 'reply', '7', '--batch', manifest);
+  const res = await cli('pr', 'reply', '7', '--batch', manifest, '--yes');
   assert.strictEqual(res.status, 0, res.stderr);
   assert.deepStrictEqual(state.writes.map((w) => `${w.method} ${w.url.replace(/^.*pullRequests\/7/, '')}`), [
     'POST /threads/11/comments', 'PATCH /threads/11',
@@ -241,7 +241,7 @@ test('pr reply --batch (CLI): one invalid item → every problem listed, nothing
     { thread: 12, bodyFile: 'ok.md', status: 'resolved' },
     { thread: 11, bodyFile: 'ok.md', comment: 5 },
   ]));
-  const res = await cli('pr', 'reply', '7', '--batch', manifest);
+  const res = await cli('pr', 'reply', '7', '--batch', manifest, '--yes');
   assert.strictEqual(res.status, 1);
   assert.match(res.stderr, /6 of 7 reply\(ies\) failed validation/);
   assert.match(res.stderr, /#2 thread 99 — thread 99 is not on PR #7/);
@@ -258,15 +258,15 @@ test('pr reply --batch (CLI): a head that moved past --expect-head holds every r
   file('ok.md', 'Fine.');
   const manifest = file('m.json', JSON.stringify({ expectHead: HEAD, replies: [{ thread: 11, bodyFile: 'ok.md' }] }));
   state.head = '1234567890abcdef1234567890abcdef12345678';
-  const fromManifest = await cli('pr', 'reply', '7', '--batch', manifest);
+  const fromManifest = await cli('pr', 'reply', '7', '--batch', manifest, '--yes');
   assert.strictEqual(fromManifest.status, 1);
   assert.match(fromManifest.stderr, /head has MOVED.*Nothing was posted — all 1 reply\(ies\) were held back/s);
 
-  const fromFlag = await cli('pr', 'reply', '7', '--batch', manifest, '--expect-head', 'abcdef1');
+  const fromFlag = await cli('pr', 'reply', '7', '--batch', manifest, '--expect-head', 'abcdef1', '--yes');
   assert.strictEqual(fromFlag.status, 1);
   assert.match(fromFlag.stderr, /expected: abcdef1/);
 
-  const malformed = await cli('pr', 'reply', '7', '--batch', manifest, '--expect-head', 'zzz');
+  const malformed = await cli('pr', 'reply', '7', '--batch', manifest, '--expect-head', 'zzz', '--yes');
   assert.strictEqual(malformed.status, 1);
   assert.match(malformed.stderr, /is not a commit sha/);
   assert.deepStrictEqual(state.writes, []);
@@ -280,7 +280,7 @@ test('pr reply --batch (CLI): a failure after posting started lists what landed 
     { thread: 13, bodyFile: 'ok.md' },
   ]));
   state.failReplyOn = 12;
-  const res = await cli('pr', 'reply', '7', '--batch', manifest);
+  const res = await cli('pr', 'reply', '7', '--batch', manifest, '--yes');
   assert.strictEqual(res.status, 1);
   assert.match(res.stderr, /#2 FAILED posting the reply/);
   assert.match(res.stderr, /do NOT re-run the whole batch/);
@@ -344,7 +344,50 @@ test('pr edit-comment without --append still replaces the comment', () => withFa
   assert.strictEqual(state.threads[11].comments[0].content, 'Replaced.');
 }));
 
-test('unknown flags still abort the new commands before any request', () => withFake(async ({ cli, state, file }) => {
+test('pr reply --batch (CLI): without --yes it validates and previews, exits 0 and posts nothing', () => withFake(async ({ cli, state, file }) => {
+  file('ok.md', 'Fine.');
+  const manifest = file('m.json', JSON.stringify([{ thread: 11, bodyFile: 'ok.md', status: 'fixed' }, { thread: 12, bodyFile: 'ok.md' }]));
+  const res = await cli('pr', 'reply', '7', '--batch', manifest);
+  assert.strictEqual(res.status, 0, res.stderr);
+  assert.match(res.stdout, /DRY RUN — 2 reply\(ies\) would be posted to PR #7/);
+  assert.match(res.stdout, /Nothing was posted\. Re-run with --yes to post\./);
+  assert.match(res.stderr, /✓ all 2 reply\(ies\) valid/);
+  assert.deepStrictEqual(state.writes, []);
+
+  const dry = await cli('pr', 'reply', '7', '--batch', manifest, '--dry-run', '--yes');
+  assert.strictEqual(dry.status, 0, dry.stderr);
+  assert.doesNotMatch(dry.stdout, /Re-run with --yes/);
+  assert.deepStrictEqual(state.writes, [], '--dry-run wins over --yes');
+}));
+
+// The thread-ownership guard on the commands that existed before
+
+test('pr reply / edit-comment / close-thread (CLI): a thread of another PR is refused with no write request', () => withFake(async ({ cli, state, file }) => {
+  const body = file('b.md', 'text');
+  const reply = await cli('pr', 'reply', '7', '99', '--body-file', body);
+  assert.strictEqual(reply.status, 1);
+  assert.match(reply.stderr, /Thread 99 is not on PR #7\..*Nothing was posted\./s);
+  const edit = await cli('pr', 'edit-comment', '7', '99', '--body-file', body);
+  assert.strictEqual(edit.status, 1);
+  assert.match(edit.stderr, /Thread 99 is not on PR #7\..*Nothing was updated\./s);
+  const close = await cli('pr', 'close-thread', '7', '99');
+  assert.strictEqual(close.status, 1);
+  assert.match(close.stderr, /Thread 99 is not on PR #7\..*Nothing was closed\./s);
+  assert.deepStrictEqual(state.writes, []);
+}));
+
+test('pr reply / close-thread (CLI): a thread of this PR still works', () => withFake(async ({ cli, state, file }) => {
+  const body = file('b.md', 'Thanks, done.');
+  const reply = await cli('pr', 'reply', '7', '12', '--body-file', body);
+  assert.strictEqual(reply.status, 0, reply.stderr);
+  assert.match(reply.stdout, /Reply posted in thread 12 \(comment id 2\)/);
+  const close = await cli('pr', 'close-thread', '7', '12');
+  assert.strictEqual(close.status, 0, close.stderr);
+  assert.strictEqual(state.threads[12].status, 'closed');
+  assert.deepStrictEqual(state.writes.map((w) => w.method), ['POST', 'PATCH']);
+}));
+
+test('unknown flags still abort the new commands before any request',() => withFake(async ({ cli, state, file }) => {
   const add = file('add.md', 'x');
   const typo = await cli('pr', 'edit-comment', '7', '11', '--body-file', add, '--apend');
   assert.strictEqual(typo.status, 1);

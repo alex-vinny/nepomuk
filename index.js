@@ -13,7 +13,7 @@
  *   pr comments <pr-url>           List PR comment threads
  *   pr comment  <pr-url> --body-file <path> [--file <path> --line <n>] [--attach-images]   Add a PR comment (markdown file)
  *   pr reply        <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  Reply inside an existing thread (markdown file)
- *   pr reply        <pr-url> --batch <manifest.json> [--expect-head <sha>] [--dry-run]  Reply to several threads, all validated first
+ *   pr reply        <pr-url> --batch <manifest.json> [--expect-head <sha>] [--yes]  Reply to several threads, all validated first (previews unless --yes)
  *   pr edit-comment <pr-url> <threadId> --body-file <path> [--comment <n>] [--append] [--attach-images] [--dry-run]  Edit a comment in place (markdown file)
  *   pr attachments  <pr-url>       List attachments
  *   pr attach   <pr-url> <file>    Attach a local file (previews unless --yes)
@@ -1143,6 +1143,9 @@ async function cmdPrReply(rawUrl, threadIdStr, text, flags, config) {
   const p = needPrUrlOrId(rawUrl, config, flags);
   const parentCommentId = flags.comment ? parseInt(flags.comment, 10) : 1;
   const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
+  // Azure posts a reply to a thread of another PR without a word: the thread must be in
+  // this PR's listing. Checked after the local-only refusals and before any upload or post.
+  requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'posted');
   if (flags['dry-run']) {
     console.log(`DRY RUN — nothing posted. Would reply in thread ${threadId} (to comment ${parentCommentId}).`);
     const body = images ? images.preview : content;
@@ -1176,13 +1179,14 @@ async function cmdPrEditComment(rawUrl, threadIdStr, text, flags, config) {
   const commentId = flags.comment ? parseInt(flags.comment, 10) : 1;
   if (isNaN(commentId)) die(`Invalid --comment: ${flags.comment}`);
   const append = !!flags.append;
+  const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
 
-  // --append: the text is added to the END of the comment as it is now, so the current
-  // text is read first — from the listing of this PR, which also proves the thread is
-  // the PR's (Azure would edit a thread of another PR without a word).
+  // The thread must be in this PR's listing: Azure edits a thread of another PR without a
+  // word. With --append the text is added to the END of the comment as it is now, so the
+  // current text is read from that same listing.
+  const thread = requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'updated');
   let existing = null;
   if (append) {
-    const thread = requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'updated');
     const comment = pr.findThreadComment(thread, commentId);
     if (!comment) {
       die(`Comment ${commentId} is not in thread ${threadId} of PR #${p.prId} (or it was deleted). `
@@ -1191,7 +1195,6 @@ async function cmdPrEditComment(rawUrl, threadIdStr, text, flags, config) {
     existing = comment.content == null ? '' : String(comment.content);
   }
 
-  const images = await planPrBodyImages({ content, bodyFile: flags['body-file'], flags, config, p });
   const finalBody = (added) => (append ? pr.appendCommentContent(existing, added) : added);
   if (flags['dry-run']) {
     console.log(append
@@ -1393,11 +1396,14 @@ async function cmdPrReplyBatch(rawUrl, threadIdStr, flags, config) {
       ? `, status already ${r.status}`
       : `, then status ${r.currentStatus == null ? '(none)' : r.currentStatus} → ${r.status}`;
   };
-  if (flags['dry-run']) {
+  // Several replies and status changes other people are notified of: like `pr vote`, the
+  // batch writes only with --yes. --dry-run is kept as a name for the same preview.
+  if (flags['dry-run'] || !flags.yes) {
     console.log(`DRY RUN — ${prepared.length} reply(ies) would be posted to PR #${p.prId}:`);
     for (const r of prepared) {
       console.log(`  ${r.label} thread ${r.threadId} (${r.where}) to comment ${r.parentCommentId}  (${r.content.length} chars)${statusNote(r)}`);
     }
+    console.log(`\nNothing was posted.${flags['dry-run'] ? '' : ' Re-run with --yes to post.'}`);
     return;
   }
 
@@ -1436,6 +1442,7 @@ async function cmdPrCloseThread(rawUrl, threadIdStr, config, flags = {}) {
   const threadId = parseInt(threadIdStr, 10);
   if (isNaN(threadId)) die(`Invalid threadId: ${threadIdStr}`);
   const p = needPrUrlOrId(rawUrl, config, flags);
+  requirePrThread(await pr.getComments({ config, ...p }), threadId, p.prId, 'closed');
   await pr.updateThread({ config, ...p, threadId, status: 'closed' });
   console.log(`Thread ${threadId} closed.`);
 }
@@ -3330,7 +3337,7 @@ Usage:
   azure-connector pr comment       <pr-url> --body-file <path> [--file <path> --line <n>] [--dry-run] [--no-validate] [--attach-images]   # Markdown file; inline text is not supported
                                    # inline anchor is validated against the PR's latest iteration (path casing auto-corrected, phantom lines rejected); --dry-run previews without posting
   azure-connector pr reply         <pr-url> <threadId> --body-file <path> [--comment <n>] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
-  azure-connector pr reply         <pr-url> --batch <manifest.json> [--expect-head <sha>] [--dry-run]
+  azure-connector pr reply         <pr-url> --batch <manifest.json> [--expect-head <sha>] [--yes]   # previews unless --yes (--dry-run = the same preview)
                                    # answer several threads: every thread checked to be on THIS PR, every body file read, the head checked,
                                    # before the first post; manifest = [{ thread, bodyFile, status?, comment? }] or { expectHead, replies: [...] }
   azure-connector pr edit-comment  <pr-url> <threadId> --body-file <path> [--comment <n>] [--append] [--attach-images] [--dry-run]  # Markdown file; inline text is not supported
@@ -3348,7 +3355,7 @@ Usage:
   azure-connector pr vote          <pr-url|pr-id> <10|5|0|-5|-10|approve|approve-with-suggestions|reset|wait-for-author|reject> [--expect-head <sha>] [--yes]
                                    # sets YOUR vote (the PAT's identity); previews unless --yes; read back after the write; 0 clears the vote
   azure-connector pr delete-thread <pr-url> <threadId> [--comment <n>]
-  azure-connector pr close-thread  <pr-url> <threadId>
+  azure-connector pr close-thread  <pr-url> <threadId>                              # reply, edit-comment and close-thread refuse a thread that is not on this PR
   azure-connector pr thread-status <pr-url|pr-id> <threadId> <active|fixed|wontFix|closed|byDesign|pending> [--yes]
                                    # previews unless --yes; refuses a thread that is not on this PR; read back after the write
   azure-connector pr timeline     <pr-url> [--json]                                    # created → published → each vote → completed, with day deltas

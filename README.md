@@ -478,14 +478,17 @@ parent comment (default 1). Markdown body, `--body-file` only.
 > ⚠️ **Azure does not check that the thread belongs to the PR in the URL.** A thread id from another PR is accepted
 > and the reply lands on that other PR, silently (seen twice: replies posted on another team's PR). Take the id from
 > `pr comments` of the same PR right before replying. The same holds for `edit-comment` and any raw PATCH on a thread.
-> `pr reply --batch`, `pr edit-comment --append` and `pr thread-status` check it for you: a thread that is not in the
-> PR's own listing is refused before anything is written.
+> `pr reply` (single and `--batch`), `pr edit-comment`, `pr close-thread` and `pr thread-status` check it for you: a
+> thread that is not in the PR's own listing is refused before anything is written.
 
 ##### Answer several threads at once (`--batch`)
 
 ```bash
-node index.js pr reply <pr-url> --batch ./replies/manifest.json --dry-run
-node index.js pr reply <pr-url> --batch ./replies/manifest.json --expect-head b31b63dc89
+# Preview: every check runs, nothing is posted
+node index.js pr reply <pr-url> --batch ./replies/manifest.json
+
+# Post
+node index.js pr reply <pr-url> --batch ./replies/manifest.json --expect-head b31b63dc89 --yes
 ```
 
 ```json
@@ -502,7 +505,8 @@ node index.js pr reply <pr-url> --batch ./replies/manifest.json --expect-head b3
 Same contract as `pr comment --batch`: **everything** is checked before the first reply goes
 out — each thread is on this PR, each parent comment (`comment`, default 1) exists, each body
 file exists, is not empty and points at no local image, each `status` is valid. One bad item
-and nothing is posted; every problem is listed.
+and nothing is posted; every problem is listed. **Nothing is posted without `--yes`**: without
+it (or with `--dry-run`) the command validates, prints each reply and status change, and exits 0.
 
 The expected head (`expectHead` in the manifest, or `--expect-head`, which wins) is the reason
 this exists: replies posted one by one while the author pushes end up answering code that is no
@@ -533,7 +537,7 @@ node index.js pr edit-comment <pr-url> <threadId> --body-file ./update.md --appe
 `--append` reads the comment as it is now and writes it back with the file's text after one
 blank line, so the original wording is never retyped (or lost). `--dry-run` prints the whole
 resulting text. Without `--comment` it edits comment 1, as a plain edit does. The thread must be
-in the PR's own listing.
+in the PR's own listing — with or without `--append`.
 
 ---
 
@@ -1954,4 +1958,5 @@ Azure did not keep is a failure, and `--json` on a text-only command is refused 
 against a fake Azure that, like the real one, accepts a thread id of another PR: an invalid status
 makes no request, the preview writes nothing, `--yes` writes once and reads the thread back, a
 foreign thread is refused, one bad batch item or a moved head posts nothing, a failure mid-batch
-lists what landed, and `--append` keeps the original text.
+lists what landed, the batch writes nothing without `--yes`, `--append` keeps the original text,
+and `pr reply`, `pr edit-comment` and `pr close-thread` refuse a thread of another PR.

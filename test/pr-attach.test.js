@@ -261,6 +261,10 @@ function fakeAzure() {
         state.posts.push({ name: up[1], body });
         return json(201, a);
       }
+      // pr reply checks that the thread is in the PR's own listing before posting.
+      if (req.method === 'GET' && url === '/acme/P/_apis/git/repositories/R/pullRequests/7/threads') {
+        return json(200, { value: [{ id: 99, status: 'active', comments: [{ id: 1, content: 'x' }] }] });
+      }
       if (req.method === 'POST' && /\/pullRequests\/7\/threads\/99\/comments$/.test(url)) {
         state.comments.push(JSON.parse(body.toString('utf8')));
         return json(200, { id: 2 });
