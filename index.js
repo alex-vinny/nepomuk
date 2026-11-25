@@ -49,6 +49,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring } = require('./lib/config');
 const { request, validatePat } = require('./lib/api');
 const pr = require('./lib/pr');
@@ -3300,9 +3301,9 @@ async function resolveRepoNames(rels, config, p, flags = {}) {
   return out;
 }
 
+// os.homedir() knows each OS's home (USERPROFILE, HOME, the passwd entry); never the cwd.
 function repoCachePath() {
-  const home = process.env.USERPROFILE || process.env.HOME || '.';
-  return path.join(home, '.azure-connector-repos.json');
+  return path.join(os.homedir(), '.azure-connector-repos.json');
 }
 
 function loadRepoCache() {
