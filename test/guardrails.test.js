@@ -329,9 +329,9 @@ test('findPersonalData: CPF, phone, bare 11 digits and e-mail are caught, by kin
 
 test('findPersonalData: ids, versions, migrations, dates, GUIDs and links are not personal data', () => {
   const text = [
-    '<p>Migration202611031214 sobe com svc-kanban 20261112.4-rc e elos 20261113.8-rc.</p>',
+    '<p>Migration202611031214 sobe com svc-orders 20261112.4-rc e web 20261113.8-rc.</p>',
     '<p>Card 1688003, quadro 417, PR !25560, item #69444, em 16/11/2026 e 2026-11-25T14:00:00Z.</p>',
-    '<p><img src="https://dev.azure.com/evuptec/930419c4-6662-46df-9c4d-ec0af4f66293/_apis/wit/attachments/d6ae946a-7fbc-4b0f-a0e1-ef0907f9093f?fileName=a.png"></p>',
+    '<p><img src="https://dev.azure.com/contoso/3f2b8c1e-5a47-4d9e-b6c0-2e81f4a7d953/_apis/wit/attachments/7c4e9a12-8b3d-4f60-a5e2-91d07b6c3f48?fileName=a.png"></p>',
     '<p>323.131 emblemas, 99,98% conformes, commit 7ed3de70.</p>',
   ].join('');
   assert.deepStrictEqual(findPersonalData(text), []);
