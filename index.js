@@ -1840,19 +1840,36 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
   // --verify: refuse a rewrite that silently drops a fact, or that carries markup
   // the work-item form will not render. Compared against the live value by default,
   // or an offline baseline with --against (for a report or wiki page).
+  // The live value: baseline for --verify and for the generated-block check.
+  const liveValue = ((await wi.getWorkItem({ config, ...p })).fields || {})[field] || '';
+
   if (flags.verify || flags.against) {
-    let baseline = '';
-    if (flags.against && flags.against !== true) {
+    let baseline = liveValue;
+    const fromFile = Boolean(flags.against && flags.against !== true);
+    if (fromFile) {
       try { baseline = fs.readFileSync(flags.against, 'utf8'); }
       catch (e) { die(`Could not read --against "${flags.against}": ${e.message}`); }
-    } else {
-      const live = await wi.getWorkItem({ config, ...p });
-      baseline = (live.fields || {})[field] || '';
     }
-    const verdict = verify.verifyFieldWrite({ before: baseline, after: content });
+    const verdict = verify.verifyFieldWrite({ before: baseline, after: content, baselineFromHistory: fromFile });
     reportVerifyVerdict(verdict, field, flags);
     if (!verdict.ok && !flags.force) {
       die('Nothing was written. Fix the draft, or re-run with --force if you have decided the change is right.');
+    }
+  }
+
+  // Always on: a broken [evup-refina] block (the batch mode of /vault:dev reads it)
+  // and text shaped like personal data (a field is a document — LGPD). Only kinds
+  // and counts are printed, never the matched text.
+  const blockProblems = verify.findGeneratedBlockProblems(liveValue, content);
+  const personal = verify.findPersonalData(content);
+  if (blockProblems.length || personal.length) {
+    console.error(`content check "${field}":`);
+    for (const b of blockProblems) console.error(`  ✗ ${b.name} — ${b.fix}`);
+    for (const h of personal) {
+      console.error(`  ✗ ${h.count} × ${h.name} — real personal data does not go into a field; describe by criterion or count, or use test data.`);
+    }
+    if (!flags.force) {
+      die('Nothing was written. Fix the draft, or re-run with --force once you have checked it is test data / the block change is intended.');
     }
   }
 
@@ -1984,9 +2001,9 @@ function reportVerifyVerdict(verdict, field, flags) {
   const { lost, forbidden, truncatedBaseline, counts } = verdict;
   console.error(`verify "${field}": ${counts.beforeChars} -> ${counts.afterChars} chars`);
   if (truncatedBaseline) {
-    console.error(`  ⚠  The CURRENT value is exactly ${verify.TRUNCATION_BYTES} bytes — Azure's truncation length.`);
-    console.error('     It is almost certainly cut, so a comparison against it would invent losses.');
-    console.error('     Fact-loss checking was SKIPPED. Read the field in the browser before overwriting it.');
+    console.error(`  ⚠  The --against baseline is exactly ${verify.HISTORY_TEXT_LIMIT} characters — the length Azure's revision history cuts long values to.`);
+    console.error('     It is almost certainly incomplete, so a comparison against it would invent losses.');
+    console.error('     Fact-loss checking was SKIPPED. Compare against the live value (drop --against) or a full copy.');
   }
   for (const [kind, items] of Object.entries(lost)) {
     console.error(`  ✗ ${kind} present now and missing from the draft: ${items.join(', ')}`);
@@ -3172,8 +3189,16 @@ async function cmdWiUpdates(rawUrl, flags, config) {
         rows.push({ rev: u.rev, field: ref, from: ch.oldValue, to: ch.newValue, by: (u.revisedBy || {}).displayName || '' });
       }
     }
+    // Long text in the history comes back cut at 8192 characters; say so instead of
+    // letting a cut value pass for the whole one.
+    const cut = (v) => verify.looksHistoryCut(v);
+    for (const r of rows) if (cut(r.from) || cut(r.to)) r.historyCut = true;
     if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
-    for (const r of rows) console.log(`r${r.rev}\t${r.field}\t${String(r.from ?? '')} → ${String(r.to ?? '')}\t${r.by}`);
+    const mark = (v) => `${String(v ?? '')}${cut(v) ? ' [cut at 8192 chars by the history]' : ''}`;
+    for (const r of rows) console.log(`r${r.rev}\t${r.field}\t${mark(r.from)} → ${mark(r.to)}\t${r.by}`);
+    if (rows.some((r) => r.historyCut)) {
+      process.stderr.write(`\nSome values are cut at ${verify.HISTORY_TEXT_LIMIT} characters: the revision history keeps no more. The current value is whole (wi field).\n`);
+    }
     return;
   }
 

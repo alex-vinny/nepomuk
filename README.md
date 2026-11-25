@@ -978,11 +978,29 @@ verify "Custom.RootCause": 4120 -> 3980 chars
 
 Nothing is written on a failed verdict; `--force` proceeds anyway.
 
-> ⚠️ **The truncation trap.** Azure silently truncates a long field value at exactly 8192
-> bytes. A baseline that comes back at exactly that length is almost certainly cut, so
-> fact-loss checking is **skipped** and said so loudly — comparing against a cut value would
-> invent losses and the check would lie with confidence. Read the field in the browser
-> before overwriting it.
+> ⚠️ **The history cut.** The *current* value of a field is stored and returned whole —
+> values past 10 000 characters are common. What Azure cuts is the **history**:
+> `/revisions/{n}`, `/updates` (`oldValue`/`newValue`) and `?asOf=` return a long text cut at
+> exactly **8192 characters** (characters, not bytes). The live baseline `--verify` reads is
+> therefore always complete. An `--against` baseline at exactly 8192 characters may have been
+> copied out of the history, so fact-loss checking is **skipped** for it and said so loudly.
+> `wi updates --all-fields` marks such values `[cut at 8192 chars by the history]`. Keep a full
+> copy before overwriting a long field: the history will not give it back.
+
+##### Always-on content checks
+
+Every `wi set-field` (dry-run included) also refuses, before writing:
+
+- **a broken `[evup-refina]` block** — the live value has the generated block and the draft
+  drops it, or the draft duplicates it, loses one marker or reverses them. `/vault:refina`
+  replaces the block by its markers and `/vault:dev` in batch mode reads the Bug's report from
+  between them; write around the block, never through it.
+- **text shaped like personal data** — CPF, phone number, bare 11-digit number, e-mail. A field
+  is a document; real personal data of a customer or employee does not go into it (LGPD).
+  Ids, versions (`20261112.4-rc`), `Migration…` names, dates, GUIDs and links are ignored. Only
+  the kind and the count are printed, never the matched text.
+
+`--force` proceeds once you have checked it is test data or the block change is intended.
 
 Examples:
 ```bash
@@ -1960,8 +1978,9 @@ same-value rewrite is not a state transition, a year-9999 date is no date, a hum
 
 `guardrails.test.js` covers the checks that run before a write: inline-anchor duplicate
 detection, head-movement detection, project resolution from an Area path, the canonical link
-lines, and the field-write verifier (fact loss as a multiset, unrenderable markup, and the
-8192-byte truncation signature that makes a fact-loss comparison meaningless).
+lines, and the field-write verifier (fact loss as a multiset, unrenderable markup, the
+8192-character history-cut signature that makes a fact-loss comparison meaningless, the
+`[evup-refina]` block markers, and personal-data-shaped text reported by kind and count).
 
 `pr-vote.test.js` covers `pr vote` and `pr comments --json`: vote parsing (numbers and names,
 everything else refused), the blockers (closed PR, moved head), the comment summary that drops

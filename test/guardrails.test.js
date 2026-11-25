@@ -194,7 +194,8 @@ test('parseRuleValidationErrors: finds nothing rather than inventing a field', (
 
 // ── verify (wi set-field --verify) ───────────────────────────────────────────
 const {
-  findLostFacts, findForbiddenMarkup, looksTruncated, verifyFieldWrite, TRUNCATION_BYTES,
+  findLostFacts, findForbiddenMarkup, looksHistoryCut, verifyFieldWrite, HISTORY_TEXT_LIMIT,
+  findGeneratedBlockProblems, findPersonalData, GENERATED_BLOCK,
 } = require('../lib/verify');
 
 test('findLostFacts: a dropped number is caught — the failure that happened 3x', () => {
@@ -270,21 +271,70 @@ test('findForbiddenMarkup: every rule carries a remedy, not just a rejection', (
   }
 });
 
-test('looksTruncated: exactly 8192 bytes is the truncation signature', () => {
-  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES)), true);
-  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES - 1)), false);
-  assert.strictEqual(looksTruncated('a'.repeat(TRUNCATION_BYTES + 1)), false);
-  // Byte length, not character length — accents must not fool it.
-  assert.strictEqual(looksTruncated('é'.repeat(TRUNCATION_BYTES / 2)), true);
+test('looksHistoryCut: exactly 8192 characters is the history signature', () => {
+  assert.strictEqual(looksHistoryCut('a'.repeat(HISTORY_TEXT_LIMIT)), true);
+  assert.strictEqual(looksHistoryCut('a'.repeat(HISTORY_TEXT_LIMIT - 1)), false);
+  assert.strictEqual(looksHistoryCut('a'.repeat(HISTORY_TEXT_LIMIT + 1)), false);
+  // Characters, not bytes: the history cut an accented value at 8192 chars / 8411 bytes.
+  assert.strictEqual(looksHistoryCut('é'.repeat(HISTORY_TEXT_LIMIT)), true);
+  assert.strictEqual(looksHistoryCut('é'.repeat(HISTORY_TEXT_LIMIT / 2)), false);
 });
 
-test('verifyFieldWrite: a truncated baseline skips fact-loss instead of inventing losses', () => {
-  const before = 'x'.repeat(TRUNCATION_BYTES - 5) + ' !999';
-  assert.strictEqual(Buffer.byteLength(before), TRUNCATION_BYTES);
+test('verifyFieldWrite: a live baseline of 8192 chars is whole and is compared', () => {
+  const before = 'x'.repeat(HISTORY_TEXT_LIMIT - 5) + ' !999';
   const v = verifyFieldWrite({ before, after: 'totally different' });
+  assert.strictEqual(v.truncatedBaseline, false);
+  assert.deepStrictEqual(v.lost.references, ['!999']);
+});
+
+test('verifyFieldWrite: a history-cut --against baseline skips fact-loss instead of inventing losses', () => {
+  const before = 'x'.repeat(HISTORY_TEXT_LIMIT - 5) + ' !999';
+  const v = verifyFieldWrite({ before, after: 'totally different', baselineFromHistory: true });
   assert.strictEqual(v.truncatedBaseline, true);
   assert.deepStrictEqual(v.lost, {});
   assert.strictEqual(v.ok, false);
+});
+
+// ── generated block ([evup-refina]) ──────────────────────────────────────────
+const blk = (body) => `<p>${GENERATED_BLOCK.start} por /evup-refina em 2026-11-25</p>${body}<p>${GENERATED_BLOCK.end}</p>`;
+const names = (hits) => hits.map((h) => h.name);
+
+test('findGeneratedBlockProblems: text written around an intact block passes', () => {
+  const before = `<p>relato</p>${blk('<p>report</p>')}`;
+  assert.deepStrictEqual(findGeneratedBlockProblems(before, `<p>relato novo</p>${blk('<p>report</p>')}`), []);
+  assert.deepStrictEqual(findGeneratedBlockProblems('', '<p>sem bloco</p>'), []);
+});
+
+test('findGeneratedBlockProblems: dropped, broken, duplicated and reversed blocks are caught', () => {
+  const before = blk('<p>r</p>');
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, '<p>reescrito</p>')), ['generated block dropped']);
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, `<p>${GENERATED_BLOCK.start}</p><p>r</p>`)), ['generated block broken']);
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, blk('a') + blk('b'))), ['generated block duplicated']);
+  const reversed = `<p>${GENERATED_BLOCK.end}</p><p>r</p><p>${GENERATED_BLOCK.start}</p>`;
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, reversed)), ['generated block reversed']);
+});
+
+// ── personal data ────────────────────────────────────────────────────────────
+test('findPersonalData: CPF, phone, bare 11 digits and e-mail are caught, by kind and count only', () => {
+  const hits = findPersonalData('<p>CPF 123.456.789-09, tel (11) 98765-4321, cel 11987654321, mail fulano@exemplo.com.br</p>');
+  assert.deepStrictEqual(hits, [
+    { name: 'CPF', count: 1 },
+    { name: 'phone number', count: 1 },
+    { name: '11-digit number (CPF or mobile phone)', count: 1 },
+    { name: 'e-mail address', count: 1 },
+  ]);
+  // The verdict never carries the matched text.
+  assert.ok(!JSON.stringify(hits).includes('98765'));
+});
+
+test('findPersonalData: ids, versions, migrations, dates, GUIDs and links are not personal data', () => {
+  const text = [
+    '<p>Migration202611031214 sobe com svc-kanban 20261112.4-rc e elos 20261113.8-rc.</p>',
+    '<p>Card 1688003, quadro 417, PR !25560, item #69444, em 16/11/2026 e 2026-11-25T14:00:00Z.</p>',
+    '<p><img src="https://dev.azure.com/evuptec/930419c4-6662-46df-9c4d-ec0af4f66293/_apis/wit/attachments/d6ae946a-7fbc-4b0f-a0e1-ef0907f9093f?fileName=a.png"></p>',
+    '<p>323.131 emblemas, 99,98% conformes, commit 7ed3de70.</p>',
+  ].join('');
+  assert.deepStrictEqual(findPersonalData(text), []);
 });
 
 test('verifyFieldWrite: clean rewrite is ok', () => {
