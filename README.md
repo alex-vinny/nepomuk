@@ -912,8 +912,23 @@ node index.js wi set-field <wi-url> <fieldRef> --body-file <path>
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --from-markdown
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --verify [--against <path>]
 node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --dry-run
+node index.js wi set-field <wi-url> <fieldRef> --body-file <path> --attach-images   # local <img> → attachment url
 node index.js wi set-field <wi-url> <fieldRef> --allow-empty       # clear a field
 ```
+
+> **`--attach-images` — prints inside a field.** A body that points at a local file
+> (`<img src="./print.png">`, or `![alt](./print.png)` with `--from-markdown`) is **refused**
+> without the flag: Azure cannot reach a file on this machine and would store a broken picture
+> without any error. With it, before anything is written, every image is checked (type, name,
+> size, item attachment count). A file whose name matches an existing attachment is downloaded
+> and compared byte for byte: identical bytes reuse that attachment, so a re-run adds no copy;
+> different bytes stop the write (rename the file or `wi detach` the old one). Then the new
+> files are uploaded **and linked** to the item (an unlinked blob is collected by Azure), and each
+> `src` becomes the attachment url with the project **name**. That is the form a field renders.
+> Relative paths resolve against the `--body-file` folder. `--dry-run` lists what would be
+> attached or reused and uploads nothing; `--verify` and the render guard see the final urls.
+> A comment is the opposite surface: there the picture travels as base64 (`wi comment`), because
+> a comment refuses attachment urls.
 
 > **`--from-markdown` — author in Markdown, store field HTML.** Converts the body with the
 > **`field` profile**: no `style=` attribute anywhere and every pipe table rendered as a `<ul>`,

@@ -1831,6 +1831,12 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
   if (flags['from-markdown']) content = wi.markdownToFieldHtml(content);
   const p = needWorkItemUrlOrId(rawUrl, config, flags);
 
+  // Local images: checked before anything is written; from here on `content` carries
+  // the urls the uploads will get, so --verify, the render guard and the dry-run all
+  // judge the body that will actually be stored.
+  const images = await planFieldImages({ content, bodyFile: flags['body-file'], flags, config, p });
+  if (images) content = images.preview;
+
   // --verify: refuse a rewrite that silently drops a fact, or that carries markup
   // the work-item form will not render. Compared against the live value by default,
   // or an offline baseline with --against (for a report or wiki page).
@@ -1857,10 +1863,121 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
   if (flags['dry-run']) {
     console.log(`DRY RUN — nothing written to #${p.id}.`);
     console.log(`Would set "${field}" to ${content.length} char(s).`);
+    if (images) {
+      for (const u of images.uploads) {
+        console.log(`  image ${u.action === 'reuse' ? 'reuses attachment' : 'would be attached as'} "${u.name}" (${u.bytes} bytes)`);
+      }
+    }
     return;
   }
-  const res = await wi.setField({ config, ...p, field, value: content, force: flags.force });
+  if (images) content = await images.commit();
+  let res;
+  try {
+    res = await wi.setField({ config, ...p, field, value: content, force: flags.force });
+  } catch (err) {
+    if (images && images.uploads.some((u) => u.done)) {
+      err.message += `\nThe images were already attached to #${p.id}; re-running reuses them.`;
+    }
+    throw err;
+  }
   console.log(`Work item ${p.id} field "${field}" updated (rev ${res.rev}).`);
+}
+
+// Local images in a field body (`<img src="./shot.png">`, or `![alt](./shot.png)` with
+// --from-markdown). Azure cannot reach a file on this machine, so without this the
+// field would show a broken picture and say nothing. Refused unless --attach-images —
+// the same contract as `pr comment --attach-images`. With it, every file is checked
+// (type, name, size, and the bytes of a same-name attachment) BEFORE any upload, and
+// the caller gets:
+//   preview  — the body with the urls the uploads will get (real length)
+//   commit() — uploads and links the new files, and returns the final body
+// Returns null when the body has no local image.
+async function planFieldImages({ content, bodyFile, flags, config, p }) {
+  const baseDir = (bodyFile && bodyFile !== true) ? path.dirname(path.resolve(bodyFile)) : process.cwd();
+  const refs = wi.findLocalFieldImages(content, { baseDir });
+  if (!refs.length) return null;
+  if (!flags['attach-images']) {
+    die(`The body points at ${refs.length} local image(s):\n${refs.map((r) => `  ${r.ref}`).join('\n')}\n`
+      + 'Azure cannot reach a file on this machine, so the field would show a broken picture. Nothing was written.\n'
+      + 'Re-run with --attach-images to attach them to the work item and reference them by url.');
+  }
+  let uploads;
+  try {
+    uploads = pr.planImageUploads(refs);
+  } catch (err) {
+    die(`${err.message}\nNothing was written.`);
+  }
+  for (const u of uploads) {
+    let st;
+    try { st = fs.statSync(u.file); } catch { die(`Image "${u.refs[0]}" not found (resolved to ${u.file}). Nothing was written.`); }
+    if (st.isDirectory()) die(`Image "${u.refs[0]}" is a directory. Nothing was written.`);
+    u.bytes = st.size;
+    u.buffer = fs.readFileSync(u.file);
+  }
+
+  // The blob is uploaded under the item's project (its Area path root), and the url
+  // put in the field names that project — the same reasoning as `wi attach`.
+  const item = await wi.getWorkItem({ config, ...p });
+  const project = links.projectFromAreaPath((item.fields || {})['System.AreaPath']) || p.project;
+  const org = p.org || config.org;
+  const existing = wi.listAttachmentsFromRelations(item.relations || []);
+  const embed = (url, name) => wi.attachmentEmbedUrl({
+    url, org, project, baseUrl: config.baseUrl && org ? `${config.baseUrl}/${org}` : null, fileName: name,
+  });
+  const newCount = { n: 0 };
+
+  for (const u of uploads) {
+    const basic = wi.checkAttachment({ fileName: u.name, size: u.bytes, existingNames: [], allowDuplicate: true });
+    if (!basic.ok) die(`${basic.message}\nNothing was written.`);
+    const verdict = wi.classifyFieldImage({ name: u.name, size: u.bytes, existing });
+    if (verdict.action === 'conflict') die(`${verdict.message}\nNothing was written.`);
+    if (verdict.action === 'compare') {
+      let match = null;
+      for (const c of verdict.candidates) {
+        const got = await wi.downloadAttachment({ config, url: c.url });
+        if (Buffer.isBuffer(got.buffer) && got.buffer.equals(u.buffer)) { match = c; break; }
+      }
+      if (!match) {
+        die(`The work item already has an attachment named "${u.name}" with different content. `
+          + 'Rename the file, or remove the old one with `wi detach`.\nNothing was written.');
+      }
+      u.action = 'reuse';
+      u.url = embed(match.url, u.name);
+      continue;
+    }
+    u.action = 'upload';
+    newCount.n += 1;
+    // Placeholder of the real shape: the blob id is only known after the upload.
+    u.url = embed(`${config.baseUrl}/${org}/_apis/wit/attachments/00000000-0000-0000-0000-000000000000`, u.name);
+  }
+  if (existing.length + newCount.n > wi.ATTACHMENTS_PER_ITEM) {
+    die(`#${p.id} has ${existing.length} attachments and this would add ${newCount.n}; Azure allows `
+      + `${wi.ATTACHMENTS_PER_ITEM}. Remove some with \`wi detach\` first.\nNothing was written.`);
+  }
+
+  const byFile = new Map(uploads.map((u) => [u.file, u]));
+  const render = () => wi.rewriteFieldImageSources(content, refs, (r) => byFile.get(path.resolve(r.file)).url);
+  return {
+    uploads,
+    preview: render(),
+    async commit() {
+      for (const u of uploads) {
+        if (u.action !== 'upload') continue;
+        let result;
+        try {
+          result = await wi.attachFile({ config, org: p.org, project, id: p.id, fileName: u.name, buffer: u.buffer });
+        } catch (err) {
+          const done = uploads.filter((x) => x.done).map((x) => x.name);
+          die(`${err.message}\nThe field was NOT written.`
+            + (done.length ? ` Already attached: ${done.join(', ')}; re-running reuses them.` : ''));
+        }
+        u.url = embed(result.url, u.name);
+        u.done = true;
+        console.error(`  attached: ${u.name} (${u.bytes} bytes)`);
+      }
+      return render();
+    },
+  };
 }
 
 function reportVerifyVerdict(verdict, field, flags) {
@@ -3367,7 +3484,7 @@ Usage:
   azure-connector wi layout      <wi-url> [--type <wit>]                   # map form labels -> field reference names (discover custom fields, incl. empty ones)
   azure-connector wi fields      <wi-url> [--all] [--filter <substr>]      # list field reference names + values (empty fields are omitted by the API)
   azure-connector wi field       <wi-url> <fieldRef>                       # print one field's raw value (e.g. for an edit round-trip)
-  azure-connector wi set-field   <wi-url> <fieldRef> [--body-file <path>] [--allow-empty]   # set ANY field from a file (HTML/markdown/plain)
+  azure-connector wi set-field   <wi-url> <fieldRef> [--body-file <path>] [--attach-images] [--allow-empty]   # set ANY field from a file (HTML/markdown/plain)
   azure-connector wi comments    <wi-url> [--ids] [--raw]                  # --ids lists comment IDs (newest first); --raw dumps raw HTML
   azure-connector wi comment     <wi-url> --body-file <path> [--field <ref>] [--as-comment] [--mention creator,assignee,<email>]   # --mention adds real @mentions (notifies); if the WI has long-form custom fields (a "Root Cause" control, etc.) it lists them and stops; --field <ref> routes the body into that field, --as-comment posts anyway
   azure-connector wi edit-comment <wi-url> <commentId> --body-file <path> # Markdown file (converted to HTML); inline text is not supported
