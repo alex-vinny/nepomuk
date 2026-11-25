@@ -316,7 +316,7 @@ test('findGeneratedBlockProblems: dropped, broken, duplicated and reversed block
 
 // ── personal data ────────────────────────────────────────────────────────────
 test('findPersonalData: CPF, phone, bare 11 digits and e-mail are caught, by kind and count only', () => {
-  const hits = findPersonalData('<p>CPF 123.456.789-09, tel (11) 98765-4321, cel 11987654321, mail fulano@exemplo.com.br</p>');
+  const hits = findPersonalData('<p>CPF 123.456.789-00, tel (11) 98765-4321, cel 11987654321, mail fulano@exemplo.com.br</p>');
   assert.deepStrictEqual(hits, [
     { name: 'CPF', count: 1 },
     { name: 'phone number', count: 1 },
