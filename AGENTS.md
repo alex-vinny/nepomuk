@@ -215,7 +215,7 @@ effect the moment it is invoked.**
 | `pr complete` | **yes** | **requires `--yes`**; previews otherwise. Refuses an inactive/draft/conflicting PR, pending policies without `--bypass`/`--auto`, and `--bypass` over a negative vote without `--force` |
 | `pr vote` | **yes** — the PAT identity's vote | **requires `--yes`**; previews otherwise. Refuses an inactive PR and, with `--expect-head`, a moved head; reads the PR back after the write |
 | `wi get|search|fields|field|layout|comments|updates|relations|missing|link` | no | — |
-| `wi set-field` | **yes** | `--dry-run`, `--verify`, and always-on guards: render (markup the form drops), `[evup-refina]` block markers kept intact, personal-data-shaped text (CPF, phone, e-mail; kind and count only). `--force` overrides |
+| `wi set-field` | **yes** | `--dry-run`, `--verify`, and always-on guards: render (markup the form drops), configured generated-block markers kept intact (`generatedBlocks` in the config or `generated-blocks.json`), personal-data-shaped text (CPF, phone, e-mail; kind and count only). `--force` overrides |
 | `wi set-state` | **yes** | `--dry-run` + always-on rule preflight |
 | `wi complete` | **yes** | `--dry-run`; with `--state`, the rule preflight of §8.6 |
 | `wi comment` | **yes** | field-routing gate (exit 2); `--mention` resolved before the write (unknown or ambiguous person = nothing posted), read back after (anchor dropped = exit 1) |

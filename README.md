@@ -991,10 +991,19 @@ Nothing is written on a failed verdict; `--force` proceeds anyway.
 
 Every `wi set-field` (dry-run included) also refuses, before writing:
 
-- **a broken `[evup-refina]` block** — the live value has the generated block and the draft
-  drops it, or the draft duplicates it, loses one marker or reverses them. `/vault:refina`
-  replaces the block by its markers and `/vault:dev` in batch mode reads the Bug's report from
-  between them; write around the block, never through it.
+- **a broken generated block** — another tool owns a block inside the field, written between
+  two visible marker lines, and reads it back later. The live value has the block and the draft
+  drops it, or the draft duplicates it, loses one marker or reverses them. Write around the
+  block, never through it. The markers are configured, not built in: list them under
+  `generatedBlocks` in `~/.azure-connector.json`, or in a `generated-blocks.json` next to
+  `index.js` (for a team that ships the tool with its markers). Both lists are merged; with
+  neither, there is nothing to check.
+
+  ```json
+  { "generatedBlocks": [
+      { "name": "triage", "start": "[triage-bot] generated block start", "end": "[triage-bot] generated block end" }
+  ] }
+  ```
 - **text shaped like personal data** — CPF, phone number, bare 11-digit number, e-mail. A field
   is a document; real personal data of a customer or employee does not go into it (LGPD).
   Ids, versions (`20261112.4-rc`), `Migration…` names, dates, GUIDs and links are ignored. Only
@@ -1980,7 +1989,8 @@ same-value rewrite is not a state transition, a year-9999 date is no date, a hum
 detection, head-movement detection, project resolution from an Area path, the canonical link
 lines, and the field-write verifier (fact loss as a multiset, unrenderable markup, the
 8192-character history-cut signature that makes a fact-loss comparison meaningless, the
-`[evup-refina]` block markers, and personal-data-shaped text reported by kind and count).
+configured generated-block markers and where they are loaded from, and personal-data-shaped
+text reported by kind and count).
 
 `pr-vote.test.js` covers `pr vote` and `pr comments --json`: vote parsing (numbers and names,
 everything else refused), the blockers (closed PR, moved head), the comment summary that drops

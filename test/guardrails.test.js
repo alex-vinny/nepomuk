@@ -195,7 +195,7 @@ test('parseRuleValidationErrors: finds nothing rather than inventing a field', (
 // ── verify (wi set-field --verify) ───────────────────────────────────────────
 const {
   findLostFacts, findForbiddenMarkup, looksHistoryCut, verifyFieldWrite, HISTORY_TEXT_LIMIT,
-  findGeneratedBlockProblems, findPersonalData, GENERATED_BLOCK,
+  findGeneratedBlockProblems, findPersonalData,
 } = require('../lib/verify');
 
 test('findLostFacts: a dropped number is caught — the failure that happened 3x', () => {
@@ -295,23 +295,63 @@ test('verifyFieldWrite: a history-cut --against baseline skips fact-loss instead
   assert.strictEqual(v.ok, false);
 });
 
-// ── generated block ([evup-refina]) ──────────────────────────────────────────
-const blk = (body) => `<p>${GENERATED_BLOCK.start} por /evup-refina em 2026-11-25</p>${body}<p>${GENERATED_BLOCK.end}</p>`;
+// ── generated block ──────────────────────────────────────────────────────────
+const BLOCK = { name: 'triage', start: '[triage-bot] generated block start', end: '[triage-bot] generated block end' };
+const BLOCKS = [BLOCK];
+const blk = (body) => `<p>${BLOCK.start} by triage-bot on 2026-11-25</p>${body}<p>${BLOCK.end}</p>`;
 const names = (hits) => hits.map((h) => h.name);
 
 test('findGeneratedBlockProblems: text written around an intact block passes', () => {
-  const before = `<p>relato</p>${blk('<p>report</p>')}`;
-  assert.deepStrictEqual(findGeneratedBlockProblems(before, `<p>relato novo</p>${blk('<p>report</p>')}`), []);
-  assert.deepStrictEqual(findGeneratedBlockProblems('', '<p>sem bloco</p>'), []);
+  const before = `<p>report</p>${blk('<p>summary</p>')}`;
+  assert.deepStrictEqual(findGeneratedBlockProblems(before, `<p>new report</p>${blk('<p>summary</p>')}`, BLOCKS), []);
+  assert.deepStrictEqual(findGeneratedBlockProblems('', '<p>no block</p>', BLOCKS), []);
 });
 
 test('findGeneratedBlockProblems: dropped, broken, duplicated and reversed blocks are caught', () => {
   const before = blk('<p>r</p>');
-  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, '<p>reescrito</p>')), ['generated block dropped']);
-  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, `<p>${GENERATED_BLOCK.start}</p><p>r</p>`)), ['generated block broken']);
-  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, blk('a') + blk('b'))), ['generated block duplicated']);
-  const reversed = `<p>${GENERATED_BLOCK.end}</p><p>r</p><p>${GENERATED_BLOCK.start}</p>`;
-  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, reversed)), ['generated block reversed']);
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, '<p>rewritten</p>', BLOCKS)), ['generated block dropped']);
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, `<p>${BLOCK.start}</p><p>r</p>`, BLOCKS)), ['generated block broken']);
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, blk('a') + blk('b'), BLOCKS)), ['generated block duplicated']);
+  const reversed = `<p>${BLOCK.end}</p><p>r</p><p>${BLOCK.start}</p>`;
+  assert.deepStrictEqual(names(findGeneratedBlockProblems(before, reversed, BLOCKS)), ['generated block reversed']);
+  // The fix names the block, so two configured blocks can be told apart.
+  assert.match(findGeneratedBlockProblems(before, '', BLOCKS)[0].fix, /"triage"/);
+});
+
+test('findGeneratedBlockProblems: no configured block means nothing to check', () => {
+  assert.deepStrictEqual(findGeneratedBlockProblems(blk('<p>r</p>'), '<p>rewritten</p>'), []);
+  assert.deepStrictEqual(findGeneratedBlockProblems(blk('<p>r</p>'), '<p>rewritten</p>', []), []);
+});
+
+test('loadGeneratedBlocks: config file and tool-folder file merge, invalid entries and repeats are skipped', () => {
+  const os = require('os');
+  const fsx = require('fs');
+  const pathx = require('path');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'azc-blocks-'));
+  const cfg = pathx.join(dir, 'config.json');
+  const saved = { file: process.env.AZURE_CONFIG_FILE, tool: process.env.AZURE_CONNECTOR_TOOL_DIR };
+  try {
+    fsx.writeFileSync(cfg, JSON.stringify({ generatedBlocks: [BLOCK, { start: 'only start' }, { start: '', end: 'x' }] }));
+    fsx.writeFileSync(pathx.join(dir, 'generated-blocks.json'), JSON.stringify({
+      generatedBlocks: [{ start: BLOCK.start, end: BLOCK.end }, { start: '[b] start', end: '[b] end' }],
+    }));
+    process.env.AZURE_CONFIG_FILE = cfg;
+    process.env.AZURE_CONNECTOR_TOOL_DIR = dir;
+    const { loadGeneratedBlocks } = require('../lib/config');
+    assert.deepStrictEqual(loadGeneratedBlocks(), [
+      { name: 'triage', start: BLOCK.start, end: BLOCK.end },
+      { name: undefined, start: '[b] start', end: '[b] end' },
+    ]);
+    // Neither file present: no blocks.
+    process.env.AZURE_CONFIG_FILE = pathx.join(dir, 'missing.json');
+    process.env.AZURE_CONNECTOR_TOOL_DIR = pathx.join(dir, 'missing');
+    assert.deepStrictEqual(loadGeneratedBlocks(), []);
+  } finally {
+    for (const [k, v] of [['AZURE_CONFIG_FILE', saved.file], ['AZURE_CONNECTOR_TOOL_DIR', saved.tool]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── personal data ────────────────────────────────────────────────────────────

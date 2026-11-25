@@ -50,7 +50,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring } = require('./lib/config');
+const { loadConfig, saveConfig, requirePat, parseUrl, patExpiry, warnIfExpiring, loadGeneratedBlocks } = require('./lib/config');
 const { request, validatePat } = require('./lib/api');
 const pr = require('./lib/pr');
 const wi = require('./lib/workitem');
@@ -1858,10 +1858,10 @@ async function cmdWiSetField(rawUrl, field, value, flags, config) {
     }
   }
 
-  // Always on: a broken [evup-refina] block (the batch mode of /vault:dev reads it)
-  // and text shaped like personal data (a field is a document — LGPD). Only kinds
-  // and counts are printed, never the matched text.
-  const blockProblems = verify.findGeneratedBlockProblems(liveValue, content);
+  // Always on: a broken generated block (markers from the config; another tool
+  // reads the block back) and text shaped like personal data (a field is a
+  // document). Only kinds and counts are printed, never the matched text.
+  const blockProblems = verify.findGeneratedBlockProblems(liveValue, content, loadGeneratedBlocks());
   const personal = verify.findPersonalData(content);
   if (blockProblems.length || personal.length) {
     console.error(`content check "${field}":`);
